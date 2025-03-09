@@ -41,8 +41,8 @@ use vulkano::{
 
 use crate::scene::{Transform, geometry::Geometry};
 
-mod shaders {
-    pub mod raygen {
+pub mod shaders {
+    pub(super) mod raygen {
         vulkano_shaders::shader! {
             ty: "raygen",
             path: "src/shaders/rgen.glsl",
@@ -50,7 +50,7 @@ mod shaders {
         }
     }
 
-    pub mod miss {
+    pub(super) mod miss {
         vulkano_shaders::shader! {
             ty: "miss",
             path: "src/shaders/rmiss.glsl",
@@ -58,13 +58,17 @@ mod shaders {
         }
     }
 
-    pub mod closest_hit {
+    pub(super) mod closest_hit {
         vulkano_shaders::shader! {
             ty: "closesthit",
             path: "src/shaders/rchit.glsl",
             vulkan_version: "1.3",
         }
     }
+
+    pub type Offsets = closest_hit::Offsets;
+    pub type Material = closest_hit::Material;
+    pub type Vertex = closest_hit::Vertex;
 }
 
 #[derive(BufferContents, Vertex, Clone, Copy, Debug, PartialEq)]
@@ -83,7 +87,8 @@ pub struct CustomVertex {
 }
 
 pub struct Renderer {
-    pub descriptor_set: Arc<DescriptorSet>,
+    pub rgen_descriptor_set: Arc<DescriptorSet>,
+
     pub swapchain_image_sets: Vec<(Arc<ImageView>, Arc<DescriptorSet>)>,
     pub pipeline_layout: Arc<PipelineLayout>,
     pub pipeline: Arc<RayTracingPipeline>,
@@ -99,7 +104,6 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(context: &crate::graphics::VulkanContext) -> Self {
-        let scene = crate::scene::Scene::new();
 
         let pipeline_layout = PipelineLayout::new(
             context.device.clone(),
@@ -152,11 +156,68 @@ impl Renderer {
                         },
                     )
                     .unwrap(),
+                    // layout(binding = 0, set = 2) readonly buffer offsets_buffer {
+                    //     Offsets offsets_array[];
+                    // };
+
+                    // layout(binding = 1, set = 2) readonly buffer vertex_buffer {
+                    //     Vertex vertices[];
+                    // };
+
+                    // layout(binding = 2, set = 2) readonly buffer material_buffer {
+                    //     Material materials[];
+                    // };
+                    DescriptorSetLayout::new(
+                        context.device.clone(),
+                        DescriptorSetLayoutCreateInfo {
+                            bindings: [
+                                (
+                                    0,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::CLOSEST_HIT
+                                            | ShaderStages::ANY_HIT
+                                            | ShaderStages::INTERSECTION,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::StorageBuffer,
+                                        )
+                                    },
+                                ),
+                                (
+                                    1,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::CLOSEST_HIT
+                                            | ShaderStages::ANY_HIT
+                                            | ShaderStages::INTERSECTION,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::StorageBuffer,
+                                        )
+                                    },
+                                ),
+                                (
+                                    2,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::CLOSEST_HIT
+                                            | ShaderStages::ANY_HIT
+                                            | ShaderStages::INTERSECTION,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::StorageBuffer,
+                                        )
+                                    },
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
                 ],
                 ..Default::default()
             },
         )
         .unwrap();
+
+        let scene = crate::scene::Scene::new(context, &pipeline_layout);
 
         let pipeline = {
             let raygen = shaders::raygen::load(context.device.clone())
@@ -205,7 +266,8 @@ impl Renderer {
 
         log::info!("Ray tracing pipeline created");
 
-        let proj = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1280.0 / 720.0, 0.01, 100.0);
+        let proj =
+            glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1280.0 / 720.0, 0.01, 100.0);
         let view = glam::Mat4::look_at_rh(
             glam::Vec3::new(1.0, 0.0, 0.0),
             glam::Vec3::new(-2.0, 1.0, 0.0),
@@ -282,7 +344,7 @@ impl Renderer {
 
         log::info!("Top-level acceleration structure created");
 
-        let descriptor_set = DescriptorSet::new(
+        let rgen_descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             pipeline_layout.set_layouts()[0].clone(),
             [
@@ -293,7 +355,7 @@ impl Renderer {
         )
         .unwrap();
 
-        log::info!("Descriptor set created");
+        log::info!("Descriptor sets created");
 
         let swapchain_image_sets = context
             .images
@@ -322,7 +384,7 @@ impl Renderer {
         Self {
             pipeline_layout,
             pipeline,
-            descriptor_set,
+            rgen_descriptor_set,
             swapchain_image_sets,
             shader_binding_table,
 
@@ -369,7 +431,7 @@ impl Renderer {
         )
         .unwrap();
 
-        self.descriptor_set = descriptor_set;
+        self.rgen_descriptor_set = descriptor_set;
     }
 
     pub fn record_commands(
@@ -401,9 +463,7 @@ impl Renderer {
             });
         }
 
-        self.tlas = unsafe {
-            build_top_level_acceleration_structure(blas_instances, context)
-        };
+        self.tlas = unsafe { build_top_level_acceleration_structure(blas_instances, context) };
 
         // Update the descriptor set with the new TLAS
         self.update_descriptor_set(context);
@@ -414,8 +474,9 @@ impl Renderer {
                 self.pipeline_layout.clone(),
                 0,
                 vec![
-                    self.descriptor_set.clone(),
+                    self.rgen_descriptor_set.clone(),
                     self.swapchain_image_sets[image_index as usize].1.clone(),
+                    self.scene.rhit_descriptor_set.clone(),
                 ],
             )
             .unwrap()

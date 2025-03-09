@@ -77,7 +77,7 @@ impl super::Scene {
                             })
                             .collect();
 
-                        let geometry = Geometry::create(vertices, indices, context)?;
+                        let geometry = Geometry::create(vertices, indices, self, context)?;
 
                         // Create a new entity with the geometry and transform components
                         self.world.push((geometry, transform));

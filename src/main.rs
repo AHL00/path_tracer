@@ -11,7 +11,12 @@ use vulkano::{
     sync::GpuFuture,
 };
 use winit::{
-    application::ApplicationHandler, dpi::{LogicalSize, Size}, event::{KeyEvent, WindowEvent}, event_loop::EventLoop, keyboard::{KeyCode, PhysicalKey}, window::WindowAttributes
+    application::ApplicationHandler,
+    dpi::{LogicalSize, Size},
+    event::{KeyEvent, WindowEvent},
+    event_loop::EventLoop,
+    keyboard::{KeyCode, PhysicalKey},
+    window::WindowAttributes,
 };
 
 fn main() {
@@ -92,7 +97,13 @@ impl ApplicationHandler for App {
 
         let indices = vec![0, 1, 2];
 
-        let geometry = Geometry::create(vertices, indices, self.context.as_ref().unwrap()).unwrap();
+        let geometry = Geometry::create(
+            vertices,
+            indices,
+            &mut renderer.scene,
+            self.context.as_ref().unwrap(),
+        )
+        .unwrap();
 
         renderer.scene.world.push((geometry, transform));
 
@@ -124,6 +135,7 @@ impl ApplicationHandler for App {
         let small_rect_geometry = Geometry::create(
             small_rect_vertices,
             small_rect_indices,
+            &mut renderer.scene,
             self.context.as_ref().unwrap(),
         )
         .unwrap();
@@ -233,7 +245,7 @@ impl ApplicationHandler for App {
                 event,
                 is_synthetic,
             } => {
-               if let PhysicalKey::Code(code) = event.physical_key {
+                if let PhysicalKey::Code(code) = event.physical_key {
                     match code {
                         KeyCode::Escape => {
                             event_loop.exit();
@@ -241,7 +253,7 @@ impl ApplicationHandler for App {
                         KeyCode::Space => {
                             if let Some(context) = &mut self.context {
                                 context.winit.request_redraw();
-                            }   
+                            }
                         }
                         _ => {}
                     }

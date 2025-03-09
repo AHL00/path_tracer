@@ -16,23 +16,25 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-use crate::renderer::CustomVertex;
+use crate::renderer::{
+    CustomVertex,
+    shaders::{self, Vertex},
+};
 
 use super::Transform;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 /// A component representing a geometry object in the scene
 pub struct Geometry {
-    blas: Arc<AccelerationStructure>,
-    vertex_count: u32,
-    index_count: u32,
-    dynamic: Option<DynamicGeometryData>,
+    pub blas: Arc<AccelerationStructure>,
+    pub vertex_count: u32,
+    pub index_count: u32,
+    pub dynamic: Option<DynamicGeometryData>,
+    pub shared_buffer_offsets: shaders::Offsets,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 struct DynamicGeometryData {
-    // Store cause the BLAS needs to be rebuilt
-    vertex_buffer: Subbuffer<[CustomVertex]>,
     index_buffer: Option<Subbuffer<[u32]>>,
 }
 
@@ -46,67 +48,51 @@ impl Geometry {
     }
 
     /// Creates a new Geometry object with its own vertex and index buffers.
+    /// Geometry is linked to a specific scene due to shared buffers.
     pub fn create(
         vertices: Vec<CustomVertex>,
         indices: Vec<u32>,
+        scene: &mut crate::scene::Scene,
         context: &crate::graphics::VulkanContext,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Create vertex buffer
-        let vertex_buffer = Buffer::from_iter(
-            context.memory_allocator.clone(),
-            vulkano::buffer::BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER
-                    | BufferUsage::STORAGE_BUFFER
-                    | BufferUsage::SHADER_DEVICE_ADDRESS
-                    | BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices.iter().cloned(),
-        )?;
+        // Upload vertex buffer
+        let (vertices_start, vertices_end) = scene.add_vertices(
+            &vertices
+                .iter()
+                .map(|v| Vertex::from_custom_vertex(*v))
+                .collect::<Vec<_>>(),
+            context,
+        );
 
-        // Create index buffer (if indices are provided)
-        let (index_buffer, index_count) = if !indices.is_empty() {
-            let buffer = Buffer::from_iter(
-                context.memory_allocator.clone(),
-                vulkano::buffer::BufferCreateInfo {
-                    usage: BufferUsage::INDEX_BUFFER
-                        | BufferUsage::STORAGE_BUFFER
-                        | BufferUsage::SHADER_DEVICE_ADDRESS
-                        | BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY,
-                    ..Default::default()
-                },
-                AllocationCreateInfo {
-                    memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                        | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                    ..Default::default()
-                },
-                indices.iter().cloned(),
-            )?;
-            (Some(buffer), indices.len() as u32)
-        } else {
-            (None, 0)
-        };
+        let vertices_buffer = scene.get_vertices_subbuffer(vertices_start, vertices_end);
+
+        // Upload index buffer
+        let (index_start, index_end) = scene.add_indices(&indices, context);
+
+        let index_buffer = scene.get_indices_subbuffer(index_start, index_end);
 
         // Build BLAS for this geometry
-        let blas =
-            unsafe { build_blas_from_mesh(vertex_buffer.clone(), index_buffer.clone(), context) };
+        let blas = unsafe { build_blas_from_mesh(vertices_buffer, Some(index_buffer), context) };
 
         Ok(Self {
             blas,
             vertex_count: vertices.len() as u32,
-            index_count,
+            index_count: indices.len() as u32,
+            shared_buffer_offsets: shaders::Offsets {
+                vertex_offset: vertices_start as u32,
+                vertex_count: vertices_end as u32 - vertices_start as u32,
+                material_offset: 0,
+                material_count: 0,
+                index_offset: index_start as u32,
+                index_count: index_end as u32 - index_start as u32,
+            },
             dynamic: None,
         })
     }
 }
 
 unsafe fn build_blas_from_mesh(
-    vertex_buffer: Subbuffer<[CustomVertex]>,
+    vertex_buffer: Subbuffer<[shaders::Vertex]>,
     index_buffer: Option<Subbuffer<[u32]>>,
     context: &crate::graphics::VulkanContext,
 ) -> Arc<AccelerationStructure> {
@@ -120,7 +106,7 @@ unsafe fn build_blas_from_mesh(
         // transform_data: todo!(),
         max_vertex: vertex_buffer.len() as _,
         vertex_data: Some(vertex_buffer.into_bytes()),
-        vertex_stride: size_of::<CustomVertex>() as _,
+        vertex_stride: size_of::<shaders::Vertex>() as _,
         flags: GeometryFlags::OPAQUE,
         index_data: index_buffer.map(|buffer| IndexBuffer::U32(buffer)),
         // TODO: Transform here???
@@ -184,7 +170,8 @@ unsafe fn build_acceleration_structure_common(
         DeviceLayout::from_size_alignment(
             as_build_sizes_info.build_scratch_size,
             min_as_scratch_offset_alignment,
-        ).expect("Failed to create device layout for scratch buffer"),
+        )
+        .expect("Failed to create device layout for scratch buffer"),
     )
     .unwrap();
 

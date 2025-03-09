@@ -46,8 +46,10 @@ impl VulkanContext {
 
         let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
 
-        let required_extensions =
+        let mut required_extensions =
             Surface::required_extensions(&winit).expect("failed to get required extensions");
+        
+        required_extensions.ext_debug_utils = true;
 
         let instance = Instance::new(
             library,

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use rand::Rng;
 use vulkano::{
+    Packed24_8,
     acceleration_structure::{
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
         AccelerationStructureBuildRangeInfo, AccelerationStructureBuildType,
@@ -42,6 +43,8 @@ use vulkano::{
 use crate::scene::{Transform, geometry::Geometry};
 
 pub mod shaders {
+    use super::CustomVertex;
+
     pub(super) mod raygen {
         vulkano_shaders::shader! {
             ty: "raygen",
@@ -69,6 +72,28 @@ pub mod shaders {
     pub type Offsets = closest_hit::Offsets;
     pub type Material = closest_hit::Material;
     pub type Vertex = closest_hit::Vertex;
+
+    impl From<super::CustomVertex> for Vertex {
+        fn from(v: super::CustomVertex) -> Self {
+            Self {
+                position: [v.position.x, v.position.y, v.position.z].into(),
+                normal: [v.normal.x, v.normal.y, v.normal.z].into(),
+                uv: v.tex_coords.into(),
+                padding: [0.0; 2],
+            }
+        }
+    }
+
+    impl Vertex {
+        pub fn from_custom_vertex(v: CustomVertex) -> Self {
+            Self {
+                position: [v.position.x, v.position.y, v.position.z].into(),
+                normal: [v.normal.x, v.normal.y, v.normal.z].into(),
+                uv: v.tex_coords.into(),
+                padding: [0.0; 2],
+            }
+        }
+    }
 }
 
 #[derive(BufferContents, Vertex, Clone, Copy, Debug, PartialEq)]
@@ -104,7 +129,6 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(context: &crate::graphics::VulkanContext) -> Self {
-
         let pipeline_layout = PipelineLayout::new(
             context.device.clone(),
             PipelineLayoutCreateInfo {
@@ -167,6 +191,10 @@ impl Renderer {
                     // layout(binding = 2, set = 2) readonly buffer material_buffer {
                     //     Material materials[];
                     // };
+
+                    // layout(binding = 3, set = 2) readonly buffer index_buffer {
+                    //     uint indices[];
+                    // };
                     DescriptorSetLayout::new(
                         context.device.clone(),
                         DescriptorSetLayoutCreateInfo {
@@ -195,6 +223,17 @@ impl Renderer {
                                 ),
                                 (
                                     2,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::CLOSEST_HIT
+                                            | ShaderStages::ANY_HIT
+                                            | ShaderStages::INTERSECTION,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::StorageBuffer,
+                                        )
+                                    },
+                                ),
+                                (
+                                    3,
                                     DescriptorSetLayoutBinding {
                                         stages: ShaderStages::CLOSEST_HIT
                                             | ShaderStages::ANY_HIT
@@ -312,6 +351,7 @@ impl Renderer {
                 tex_coords: [0.5, 1.0].into(),
             },
         ];
+
         let vertex_buffer = Buffer::from_iter(
             context.memory_allocator.clone(),
             BufferCreateInfo {
@@ -444,6 +484,7 @@ impl Renderer {
 
         use legion::IntoQuery;
         let mut query = <(&mut Geometry, &mut Transform)>::query();
+        let mut offsets = vec![];
         // TODO: If the number of meshes doesn't change, we can just update the TLAS
         for (geometry, transform) in query.iter_mut(&mut self.scene.world) {
             let show_percentage = 100.0;
@@ -452,16 +493,29 @@ impl Renderer {
                 continue;
             }
 
+            let offset_idx = offsets.len();
+            offsets.push(geometry.shared_buffer_offsets);
+
             // TODO Only build if dynamic and necessary
             // Find a way to update and not rebuild the whole thing
             blas_instances.push(AccelerationStructureInstance {
                 acceleration_structure_reference: geometry.get_blas_device_address().into(),
                 transform: mat4_to_as_instance_array(transform.get_matrix()),
-                // instance_custom_index_and_mask: todo!(),
+                instance_custom_index_and_mask: Packed24_8::new(
+                    // The index into the offset buffer
+                    offset_idx as u32,
+                    0xFF,
+                ),
                 // instance_shader_binding_table_record_offset_and_flags: todo!(),
                 ..Default::default()
             });
         }
+
+        // Update the offsets buffer with the new offsets
+        self.scene.update_shared_offsets_buffer(
+            &offsets,
+            context,
+        );
 
         self.tlas = unsafe { build_top_level_acceleration_structure(blas_instances, context) };
 

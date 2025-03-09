@@ -1,8 +1,13 @@
 use std::{error::Error, sync::Arc};
 
 use vulkano::{
-    Validated, Version, VulkanError, VulkanLibrary,
-    command_buffer::allocator::StandardCommandBufferAllocator,
+    DeviceSize, Validated, Version, VulkanError, VulkanLibrary,
+    buffer::{Buffer, BufferCreateInfo, BufferUsage},
+    command_buffer::{
+        AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo,
+        PrimaryCommandBufferAbstract,
+        allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
+    },
     descriptor_set::{
         self,
         allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
@@ -11,9 +16,14 @@ use vulkano::{
         Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
         QueueFlags, physical::PhysicalDeviceType,
     },
-    image::{Image, ImageFormatInfo, ImageUsage},
+    format::Format,
+    image::{
+        Image, ImageCreateFlags, ImageCreateInfo, ImageFormatInfo, ImageType, ImageUsage,
+        sampler::{Sampler, SamplerCreateInfo},
+        view::ImageView,
+    },
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
-    memory::allocator::StandardMemoryAllocator,
+    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
     swapchain::{Surface, Swapchain, SwapchainCreateInfo},
     sync::GpuFuture,
 };
@@ -48,7 +58,7 @@ impl VulkanContext {
 
         let mut required_extensions =
             Surface::required_extensions(&winit).expect("failed to get required extensions");
-        
+
         required_extensions.ext_debug_utils = true;
 
         let instance = Instance::new(
@@ -264,5 +274,149 @@ impl VulkanContext {
         renderer.resize(self, &new_images);
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+/// Texture struct containing image, image view and sampler
+pub struct Texture {
+    pub image: Arc<Image>,
+    pub image_view: Arc<ImageView>,
+    pub sampler: Arc<Sampler>,
+}
+
+impl Texture {
+    pub fn from_gltf(
+        image: gltf::image::Data,
+        sampler: gltf::texture::Sampler,
+        context: &VulkanContext,
+    ) -> Self {
+        let format = Self::map_gltf_format_to_vulkan(image.format);
+        let extent = [image.width, image.height, 1];
+        let pixels = Self::map_gltf_image_data_to_vulkan(image.format, image.pixels);
+
+        let staging_buffer = Buffer::from_iter(
+            context.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            pixels.into_iter(),
+        )
+        .unwrap();
+
+        let image = Image::new(
+            context.memory_allocator.clone(),
+            ImageCreateInfo {
+                image_type: ImageType::Dim2d,
+                format: format,
+                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
+                extent: extent.into(),
+
+                ..Default::default()
+            },
+            AllocationCreateInfo::default(),
+        )
+        .unwrap();
+
+        // Copy the staging buffer to the image
+        let mut uploader = AutoCommandBufferBuilder::primary(
+            context.command_buffer_allocator.clone(),
+            context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        uploader
+            .copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
+                staging_buffer,
+                image.clone(),
+            ))
+            .unwrap();
+
+        let image_view = ImageView::new_default(image.clone()).unwrap();
+
+        let sampler = Sampler::new(
+            context.device.clone(),
+            SamplerCreateInfo {
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let _ = uploader
+            .build()
+            .unwrap()
+            .execute(context.queue.clone())
+            .unwrap();
+
+        // TODO: Wait to finish?
+
+        Self {
+            image,
+            image_view,
+            sampler,
+        }
+    }
+
+    fn map_gltf_format_to_vulkan(format: gltf::image::Format) -> Format {
+        match format {
+            gltf::image::Format::R8G8B8A8 => Format::R8G8B8A8_SRGB,
+            gltf::image::Format::R8G8B8 => Format::R8G8B8A8_SRGB, // NOTE: Converted to RGBA8
+            gltf::image::Format::R16G16B16A16 => Format::R16G16B16A16_SFLOAT,
+            gltf::image::Format::R32G32B32A32FLOAT => Format::R32G32B32A32_SFLOAT,
+            gltf::image::Format::R32G32B32FLOAT => Format::R32G32B32_SFLOAT,
+            gltf::image::Format::R8 => Format::R8_UNORM,
+            gltf::image::Format::R16 => Format::R16_UNORM,
+            gltf::image::Format::R8G8 => Format::R8G8_UNORM,
+            gltf::image::Format::R16G16 => Format::R16G16_UNORM,
+            gltf::image::Format::R16G16B16 => Format::R16G16B16_UNORM,
+        }
+    }
+
+    fn rgb8_srg_to_rgba8_srgb(pixels: Vec<u8>) -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(pixels.len() * 4 / 3);
+        for chunk in pixels.chunks(3) {
+            rgba.push(chunk[0]);
+            rgba.push(chunk[1]);
+            rgba.push(chunk[2]);
+            rgba.push(255);
+        }
+        rgba
+    }
+
+    fn map_gltf_image_data_to_vulkan(format: gltf::image::Format, pixels: Vec<u8>) -> Vec<u8> {
+        match format {
+            gltf::image::Format::R8G8B8A8 => pixels,
+            gltf::image::Format::R8G8B8 => Self::rgb8_srg_to_rgba8_srgb(pixels),
+            gltf::image::Format::R16G16B16A16 => pixels,
+            gltf::image::Format::R32G32B32A32FLOAT => pixels,
+            gltf::image::Format::R32G32B32FLOAT => pixels,
+            gltf::image::Format::R8 => pixels,
+            gltf::image::Format::R16 => pixels,
+            gltf::image::Format::R8G8 => pixels,
+            gltf::image::Format::R16G16 => pixels,
+            gltf::image::Format::R16G16B16 => pixels,
+        }
+    }
+
+    fn gltf_format_pixel_byte_size(format: gltf::image::Format) -> u32 {
+        match format {
+            gltf::image::Format::R8G8B8A8 => 4,
+            gltf::image::Format::R8G8B8 => 3,
+            gltf::image::Format::R16G16B16A16 => 8,
+            gltf::image::Format::R32G32B32A32FLOAT => 16,
+            gltf::image::Format::R32G32B32FLOAT => 12,
+            gltf::image::Format::R8 => 1,
+            gltf::image::Format::R16 => 2,
+            gltf::image::Format::R8G8 => 2,
+            gltf::image::Format::R16G16 => 4,
+            gltf::image::Format::R16G16B16 => 6,
+        }
     }
 }

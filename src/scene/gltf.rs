@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{graphics::VulkanContext, material::Material, renderer::CustomVertex};
 
 use super::{Transform, geometry::Geometry};
@@ -12,6 +14,16 @@ impl super::Scene {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (document, buffers, images) = gltf::import(path)?;
 
+        // Load images into textures
+        // let mut textures_map = HashMap::new();
+        // for (i, image) in images.iter().enumerate() {
+        //     image
+        //     let texture = crate::graphics::Texture::from_gltf_image(image, context)?;
+        //     self.world.push(texture);
+        // }
+
+        let gltf_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+
         for scene in document.scenes() {
             for node in scene.nodes() {
                 if let Some(mesh) = node.mesh() {
@@ -24,7 +36,10 @@ impl super::Scene {
                     transform.scale = glam::Vec3::from(scale);
 
                     for primitive in mesh.primitives() {
-                        let material = Material::from_gltf(primitive.material(), self, context);
+                        let gltf_mat = primitive.material();
+
+                        let material =
+                            Material::from_gltf(gltf_mat, self, context, &buffers, &gltf_dir);
 
                         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 

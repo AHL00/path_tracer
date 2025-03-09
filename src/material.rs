@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicU64;
 
-use crate::renderer::shaders;
+use crate::{graphics::Texture, renderer::shaders};
 
 static MATERIAL_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -13,6 +13,7 @@ pub struct Material {
 
     pub name: String,
     pub base_color: glam::Vec4,
+    pub base_texture: Option<Texture>,
     pub metallic: f32,
     pub roughness: f32,
 }
@@ -43,7 +44,7 @@ impl Into<shaders::Material> for Material {
 impl<'a> Into<shaders::Material> for gltf::Material<'a> {
     fn into(self) -> shaders::Material {
         let pbr_mr = self.pbr_metallic_roughness();
-
+        pbr_mr.base_color_texture();
         shaders::Material {
             base_color: [
                 pbr_mr.base_color_factor()[0],
@@ -64,8 +65,12 @@ impl Material {
         gltf_mat: gltf::Material<'a>,
         scene: &mut crate::scene::Scene,
         context: &crate::graphics::VulkanContext,
+        buffers: &[gltf::buffer::Data],
+        gltf_path: &std::path::Path,
     ) -> Self {
         let name = gltf_mat.name().unwrap_or("Unnamed").to_string();
+        let base_texture_info = gltf_mat.pbr_metallic_roughness().base_color_texture();
+
         let shader_mat = gltf_mat.into();
 
         let buffer_index = scene.add_material(&shader_mat, context);
@@ -81,6 +86,19 @@ impl Material {
                 shader_mat.base_color[2],
                 shader_mat.base_color[3],
             ),
+            base_texture: base_texture_info.map(|info| {
+                let image_source = info.texture().source().source();
+                let sampler = info.texture().sampler();
+
+                let data = gltf::image::Data::from_source(
+                    image_source,
+                    Some(gltf_path),
+                    buffers,
+                )
+                .unwrap();
+
+                Texture::from_gltf(data, sampler, context)
+            }),
             metallic: shader_mat.metallic,
             roughness: shader_mat.roughness,
         }

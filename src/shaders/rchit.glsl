@@ -43,9 +43,18 @@ void main() {
         v1.normal * barycentrics.y +
         v2.normal * barycentrics.z
     );
+    vec2 uv = 
+        v0.uv * barycentrics.x +
+        v1.uv * barycentrics.y +
+        v2.uv * barycentrics.z;
+    vec3 position =
+        v0.position * barycentrics.x +
+        v1.position * barycentrics.y +
+        v2.position * barycentrics.z;
 
     Material material = materials[offsets.material_offset];
     
-    // hit_value = normal;
-    hit_value = material.base_color.xyz;
+    hit_value = normal;
+    // hit_value = material.base_color.xyz;
+    // hit_value = vec3(uv.x, uv.y, 0.0);
 }

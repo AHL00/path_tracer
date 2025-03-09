@@ -1833,6 +1833,7 @@ name = "path_tracer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "bytes",
  "egui_winit_vulkano",
  "glam",
  "gltf",

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rand::Rng;
 use vulkano::{
     acceleration_structure::{
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
@@ -8,6 +9,7 @@ use vulkano::{
         AccelerationStructureGeometryInstancesData, AccelerationStructureGeometryInstancesDataType,
         AccelerationStructureGeometryTrianglesData, AccelerationStructureInstance,
         AccelerationStructureType, BuildAccelerationStructureFlags, BuildAccelerationStructureMode,
+        GeometryFlags,
     },
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
@@ -23,7 +25,7 @@ use vulkano::{
     },
     format::Format,
     image::{Image, view::ImageView},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
+    memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
         PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
         graphics::vertex_input::Vertex,
@@ -36,6 +38,8 @@ use vulkano::{
     shader::ShaderStages,
     sync::GpuFuture,
 };
+
+use crate::scene::{Transform, geometry::Geometry};
 
 mod shaders {
     pub mod raygen {
@@ -63,11 +67,19 @@ mod shaders {
     }
 }
 
-#[derive(BufferContents, Vertex)]
+#[derive(BufferContents, Vertex, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-struct MyVertex {
+/// NOTE: Position must be the first field as AccelerationStructure creation requires position and
+/// it reads data from the start of each vertex.
+pub struct CustomVertex {
     #[format(R32G32B32_SFLOAT)]
-    position: [f32; 3],
+    pub position: glam::Vec3,
+
+    #[format(R32G32B32_SFLOAT)]
+    pub normal: glam::Vec3,
+
+    #[format(R32G32_SFLOAT)]
+    pub tex_coords: glam::Vec2,
 }
 
 pub struct Renderer {
@@ -81,6 +93,7 @@ pub struct Renderer {
     // Idk how to make a tlas without a blas for now
     _blas: Arc<AccelerationStructure>,
     pub tlas: Arc<AccelerationStructure>,
+    pub uniform_buffer: Subbuffer<shaders::raygen::Camera>,
     pub scene: crate::scene::Scene,
 }
 
@@ -192,10 +205,10 @@ impl Renderer {
 
         log::info!("Ray tracing pipeline created");
 
-        let proj = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 4.0 / 3.0, 0.01, 100.0);
+        let proj = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1280.0 / 720.0, 0.01, 100.0);
         let view = glam::Mat4::look_at_rh(
-            glam::Vec3::new(0.0, 0.0, 1.0),
-            glam::Vec3::new(0.0, 0.0, 0.0),
+            glam::Vec3::new(1.0, 0.0, 0.0),
+            glam::Vec3::new(-2.0, 1.0, 0.0),
             glam::Vec3::new(0.0, -1.0, 0.0),
         );
 
@@ -221,14 +234,20 @@ impl Renderer {
         log::info!("Uniform buffer created");
 
         let vertices = [
-            MyVertex {
-                position: [-0.5, -0.25, 0.0],
+            CustomVertex {
+                position: [-0.0, -0.0, 0.0].into(),
+                normal: [0.0, 0.0, 1.0].into(),
+                tex_coords: [0.5, 1.0].into(),
             },
-            MyVertex {
-                position: [0.0, 0.5, 0.0],
+            CustomVertex {
+                position: [0.0, 0.0, 0.0].into(),
+                normal: [0.0, 0.0, 1.0].into(),
+                tex_coords: [0.5, 1.0].into(),
             },
-            MyVertex {
-                position: [0.25, -0.1, 0.0],
+            CustomVertex {
+                position: [0.0, -0.0, 0.0].into(),
+                normal: [0.0, 0.0, 1.0].into(),
+                tex_coords: [0.5, 1.0].into(),
             },
         ];
         let vertex_buffer = Buffer::from_iter(
@@ -248,7 +267,8 @@ impl Renderer {
         )
         .unwrap();
 
-        let blas = unsafe { build_acceleration_structure_triangles(vertex_buffer, context) };
+        let blas =
+            unsafe { build_acceleration_structure_triangles(vertex_buffer.clone(), context) };
 
         let tlas = unsafe {
             build_top_level_acceleration_structure(
@@ -308,6 +328,7 @@ impl Renderer {
 
             _blas: blas.clone(),
             tlas,
+            uniform_buffer,
             scene,
         }
     }
@@ -335,11 +356,58 @@ impl Renderer {
             .collect();
     }
 
+    /// Update the descriptor set with self.tlas and self.uniform_buffer
+    pub fn update_descriptor_set(&mut self, context: &crate::graphics::VulkanContext) {
+        let descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            self.pipeline_layout.set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::acceleration_structure(0, self.tlas.clone()),
+                WriteDescriptorSet::buffer(1, self.uniform_buffer.clone()),
+            ],
+            [],
+        )
+        .unwrap();
+
+        self.descriptor_set = descriptor_set;
+    }
+
     pub fn record_commands(
-        &self,
+        &mut self,
         image_index: u32,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
+        context: &crate::graphics::VulkanContext,
     ) {
+        let mut blas_instances = vec![];
+
+        use legion::IntoQuery;
+        let mut query = <(&mut Geometry, &mut Transform)>::query();
+        // TODO: If the number of meshes doesn't change, we can just update the TLAS
+        for (geometry, transform) in query.iter_mut(&mut self.scene.world) {
+            let show_percentage = 100.0;
+            let rng = rand::rng().random_range(0.0..100.0);
+            if rng > show_percentage {
+                continue;
+            }
+
+            // TODO Only build if dynamic and necessary
+            // Find a way to update and not rebuild the whole thing
+            blas_instances.push(AccelerationStructureInstance {
+                acceleration_structure_reference: geometry.get_blas_device_address().into(),
+                transform: mat4_to_as_instance_array(transform.get_matrix()),
+                // instance_custom_index_and_mask: todo!(),
+                // instance_shader_binding_table_record_offset_and_flags: todo!(),
+                ..Default::default()
+            });
+        }
+
+        self.tlas = unsafe {
+            build_top_level_acceleration_structure(blas_instances, context)
+        };
+
+        // Update the descriptor set with the new TLAS
+        self.update_descriptor_set(context);
+
         builder
             .bind_descriptor_sets(
                 PipelineBindPoint::RayTracing,
@@ -361,7 +429,117 @@ impl Renderer {
     }
 }
 
-unsafe fn build_top_level_acceleration_structure(
+pub unsafe fn update_top_level_acceleration_structure(
+    tlas: Arc<AccelerationStructure>,
+    as_instances: Vec<AccelerationStructureInstance>,
+    context: &crate::graphics::VulkanContext,
+) {
+    log::info!("Updating TLAS with {} instances", as_instances.len());
+    let instance_count = as_instances.len() as u32;
+
+    let instance_buffer = Buffer::from_iter(
+        context.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::SHADER_DEVICE_ADDRESS
+                | BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+            ..Default::default()
+        },
+        as_instances,
+    )
+    .unwrap();
+
+    let as_geometry_instances_data = AccelerationStructureGeometryInstancesData {
+        flags: GeometryFlags::OPAQUE,
+        ..AccelerationStructureGeometryInstancesData::new(
+            AccelerationStructureGeometryInstancesDataType::Values(Some(instance_buffer)),
+        )
+    };
+
+    let geometries = AccelerationStructureGeometries::Instances(as_geometry_instances_data);
+
+    let mut as_update_geometry_info = AccelerationStructureBuildGeometryInfo {
+        mode: BuildAccelerationStructureMode::Update(tlas.clone()),
+        dst_acceleration_structure: Some(tlas),
+        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE
+            | BuildAccelerationStructureFlags::ALLOW_UPDATE,
+        ..AccelerationStructureBuildGeometryInfo::new(geometries)
+    };
+
+    let as_build_sizes_info = context
+        .device
+        .acceleration_structure_build_sizes(
+            AccelerationStructureBuildType::Device,
+            &as_update_geometry_info,
+            &[instance_count],
+        )
+        .unwrap();
+
+    let min_as_scratch_offset_alignment = context
+        .device
+        .physical_device()
+        .properties()
+        .min_acceleration_structure_scratch_offset_alignment
+        .expect("Failed to get min acceleration structure scratch offset alignment")
+        as u64;
+
+    // We create a new scratch buffer for each acceleration structure for simplicity. You may want
+    // to reuse scratch buffers if you need to build many acceleration structures.
+    let scratch_buffer = Buffer::new(
+        context.memory_allocator.clone(),
+        BufferCreateInfo {
+            usage: BufferUsage::SHADER_DEVICE_ADDRESS | BufferUsage::STORAGE_BUFFER,
+            ..Default::default()
+        },
+        AllocationCreateInfo::default(),
+        DeviceLayout::from_size_alignment(
+            as_build_sizes_info.update_scratch_size,
+            min_as_scratch_offset_alignment,
+        )
+        .expect("Failed to create device layout for scratch buffer"),
+    )
+    .unwrap();
+
+    as_update_geometry_info.scratch_data = Some(scratch_buffer.into());
+
+    let as_build_range_info = AccelerationStructureBuildRangeInfo {
+        primitive_count: instance_count,
+        ..Default::default()
+    };
+
+    // For simplicity, we build a single command buffer that builds the acceleration structure,
+    // then waits for its execution to complete.
+    let mut builder = AutoCommandBufferBuilder::primary(
+        context.command_buffer_allocator.clone(),
+        context.queue.queue_family_index(),
+        CommandBufferUsage::OneTimeSubmit,
+    )
+    .unwrap();
+
+    unsafe {
+        builder
+            .build_acceleration_structure(as_update_geometry_info, vec![as_build_range_info].into())
+            .unwrap()
+    };
+
+    builder
+        .build()
+        .unwrap()
+        .execute(context.queue.clone())
+        .unwrap()
+        .then_signal_fence_and_flush()
+        .unwrap()
+        .wait(None)
+        .unwrap();
+}
+
+/// Builds a top-level acceleration structure (TLAS) from a list of instances.
+/// Blocks until the TLAS is built.
+pub unsafe fn build_top_level_acceleration_structure(
     as_instances: Vec<AccelerationStructureInstance>,
     context: &crate::graphics::VulkanContext,
 ) -> Arc<AccelerationStructure> {
@@ -413,7 +591,11 @@ unsafe fn build_top_level_acceleration_structure(
             geometries,
             primitive_count,
             AccelerationStructureType::TopLevel,
+            BuildAccelerationStructureFlags::PREFER_FAST_TRACE
+            // Important, we will only maintain one TLAS and update it throughout
+                | BuildAccelerationStructureFlags::ALLOW_UPDATE,
             context,
+            None,
         )
     }
 }
@@ -424,15 +606,21 @@ unsafe fn build_top_level_acceleration_structure(
 ///
 /// - If you are referencing a bottom-level acceleration structure in a top-level acceleration
 ///   structure, you must ensure that the bottom-level acceleration structure is kept alive.
-unsafe fn build_acceleration_structure_common(
+///
+/// Size:
+/// If smaller than the minimum, will warn.
+/// If None, will use minimum size.
+pub unsafe fn build_acceleration_structure_common(
     geometries: AccelerationStructureGeometries,
     primitive_count: u32,
     ty: AccelerationStructureType,
+    flags: BuildAccelerationStructureFlags,
     context: &crate::graphics::VulkanContext,
+    size: Option<u64>,
 ) -> Arc<AccelerationStructure> {
     let mut as_build_geometry_info = AccelerationStructureBuildGeometryInfo {
         mode: BuildAccelerationStructureMode::Build,
-        flags: BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
+        flags,
         ..AccelerationStructureBuildGeometryInfo::new(geometries)
     };
 
@@ -447,14 +635,28 @@ unsafe fn build_acceleration_structure_common(
 
     // We create a new scratch buffer for each acceleration structure for simplicity. You may want
     // to reuse scratch buffers if you need to build many acceleration structures.
-    let scratch_buffer = Buffer::new_slice::<u8>(
+    let min_as_scratch_offset_alignment = context
+        .device
+        .physical_device()
+        .properties()
+        .min_acceleration_structure_scratch_offset_alignment
+        .expect("Failed to get min acceleration structure scratch offset alignment")
+        as u64;
+
+    // We create a new scratch buffer for each acceleration structure for simplicity. You may want
+    // to reuse scratch buffers if you need to build many acceleration structures.
+    let scratch_buffer = Buffer::new(
         context.memory_allocator.clone(),
         BufferCreateInfo {
             usage: BufferUsage::SHADER_DEVICE_ADDRESS | BufferUsage::STORAGE_BUFFER,
             ..Default::default()
         },
         AllocationCreateInfo::default(),
-        as_build_sizes_info.build_scratch_size,
+        DeviceLayout::from_size_alignment(
+            as_build_sizes_info.build_scratch_size,
+            min_as_scratch_offset_alignment,
+        )
+        .expect("Failed to create device layout for scratch buffer"),
     )
     .unwrap();
 
@@ -469,7 +671,21 @@ unsafe fn build_acceleration_structure_common(
                     ..Default::default()
                 },
                 AllocationCreateInfo::default(),
-                as_build_sizes_info.acceleration_structure_size,
+                if let Some(size) = size {
+                    if size < as_build_sizes_info.acceleration_structure_size {
+                        log::warn!(
+                            "Acceleration structure size is smaller than the minimum size, using \
+                             minimum size instead"
+                        );
+
+                        as_build_sizes_info.acceleration_structure_size
+                    } else {
+                        size
+                    }
+                } else {
+                    // Minimum size
+                    as_build_sizes_info.acceleration_structure_size
+                },
             )
             .unwrap(),
         )
@@ -479,7 +695,7 @@ unsafe fn build_acceleration_structure_common(
         unsafe { AccelerationStructure::new(context.device.clone(), as_create_info) }.unwrap();
 
     as_build_geometry_info.dst_acceleration_structure = Some(acceleration.clone());
-    as_build_geometry_info.scratch_data = Some(scratch_buffer);
+    as_build_geometry_info.scratch_data = Some(scratch_buffer.into());
 
     let as_build_range_info = AccelerationStructureBuildRangeInfo {
         primitive_count,
@@ -517,15 +733,15 @@ unsafe fn build_acceleration_structure_common(
     acceleration
 }
 
-unsafe fn build_acceleration_structure_triangles(
-    vertex_buffer: Subbuffer<[MyVertex]>,
+pub unsafe fn build_acceleration_structure_triangles(
+    vertex_buffer: Subbuffer<[CustomVertex]>,
     context: &crate::graphics::VulkanContext,
 ) -> Arc<AccelerationStructure> {
     let primitive_count = (vertex_buffer.len() / 3) as u32;
     let as_geometry_triangles_data = AccelerationStructureGeometryTrianglesData {
         max_vertex: vertex_buffer.len() as _,
         vertex_data: Some(vertex_buffer.into_bytes()),
-        vertex_stride: size_of::<MyVertex>() as _,
+        vertex_stride: size_of::<CustomVertex>() as _,
         ..AccelerationStructureGeometryTrianglesData::new(Format::R32G32B32_SFLOAT)
     };
 
@@ -536,7 +752,18 @@ unsafe fn build_acceleration_structure_triangles(
             geometries,
             primitive_count,
             AccelerationStructureType::BottomLevel,
+            BuildAccelerationStructureFlags::PREFER_FAST_TRACE,
             context,
+            None,
         )
     }
+}
+
+pub(crate) fn mat4_to_as_instance_array(mat: glam::Mat4) -> [[f32; 4]; 3] {
+    let arr: [f32; 12] = mat.transpose().to_cols_array()[..12].try_into().unwrap();
+    [
+        [arr[0], arr[1], arr[2], arr[3]],
+        [arr[4], arr[5], arr[6], arr[7]],
+        [arr[8], arr[9], arr[10], arr[11]],
+    ]
 }

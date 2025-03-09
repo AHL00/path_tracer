@@ -1,4 +1,5 @@
 pub mod geometry;
+pub mod gltf;
 
 pub struct Scene {
     pub world: legion::World,

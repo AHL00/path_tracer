@@ -43,6 +43,9 @@ void main() {
         v1.normal * barycentrics.y +
         v2.normal * barycentrics.z
     );
+
+    Material material = materials[offsets.material_offset];
     
-    hit_value = normal;
+    // hit_value = normal;
+    hit_value = material.base_color.xyz;
 }

@@ -110,7 +110,10 @@ impl Scene {
         let shared_material_buffer: Subbuffer<[shaders::Material]> = Buffer::new_slice(
             context.memory_allocator.clone(),
             BufferCreateInfo {
-                usage: vulkano::buffer::BufferUsage::STORAGE_BUFFER,
+                usage: BufferUsage::STORAGE_BUFFER
+                    | BufferUsage::TRANSFER_DST
+                    | BufferUsage::SHADER_DEVICE_ADDRESS
+                    | BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -182,6 +185,7 @@ impl Scene {
 
     /// Adds vertices to the shared vertex buffer and returns the start and end offset.
     /// NOTE: MAKE SURE A FRAME IS NOT IN FLIGHT.
+    /// Returns (start, end) offsets in the shared vertex buffer.
     pub fn add_vertices(
         &mut self,
         vertices: &[shaders::Vertex],
@@ -248,20 +252,71 @@ impl Scene {
         self.shared_vertex_buffer.clone().slice(start..end)
     }
 
-    /// Adds materials to the shared material buffer and returns the start and end offset.
+    /// Adds a material to the shared material buffer and returns the offset in the buffer.
     /// NOTE: MAKE SURE A FRAME IS NOT IN FLIGHT.
-    pub fn add_materials(
-        &mut self,
-        materials: &[shaders::Material],
-        context: &VulkanContext,
-    ) -> (u64, u64) {
-        todo!("Implement add_materials");
+    pub fn add_material(&mut self, materials: &shaders::Material, context: &VulkanContext) -> u64 {
+        let start_offset = self.material_offset;
+        let end_offset = start_offset + 1;
+
+        // Check if we have enough space
+        if end_offset > Self::SHARED_MATERIAL_BUFFER_SIZE {
+            panic!("Material buffer overflow");
+        }
+
+        // Create a host-visible staging buffer
+        let staging_buffer = Buffer::from_iter(
+            context.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            std::iter::once(*materials),
+        )
+        .unwrap();
+
+        // Create a command buffer to copy from staging to device-local buffer
+        let mut builder = AutoCommandBufferBuilder::primary(
+            context.command_buffer_allocator.clone(),
+            context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .unwrap();
+
+        builder
+            .copy_buffer(CopyBufferInfo::buffers(
+                staging_buffer,
+                self.shared_material_buffer
+                    .clone()
+                    .slice(start_offset..end_offset),
+            ))
+            .unwrap();
+
+        // Execute the command buffer and wait for completion
+        builder
+            .build()
+            .unwrap()
+            .execute(context.queue.clone())
+            .unwrap()
+            .then_signal_fence_and_flush()
+            .unwrap()
+            .wait(None)
+            .unwrap();
+
+        // Update offset for next write
+        self.material_offset = end_offset;
+        start_offset
     }
 
     pub fn get_materials_subbuffer(&self, start: u64, end: u64) -> Subbuffer<[shaders::Material]> {
         self.shared_material_buffer.clone().slice(start..end)
     }
 
+    /// Returns (start, end) offsets in the shared index buffer.
     pub fn add_indices(&mut self, indices: &[u32], context: &VulkanContext) -> (u64, u64) {
         let start_offset = self.index_offset;
         let end_offset = start_offset + indices.len() as u64;

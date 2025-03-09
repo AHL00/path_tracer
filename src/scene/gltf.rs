@@ -1,9 +1,10 @@
-use crate::{graphics::VulkanContext, renderer::CustomVertex};
+use crate::{graphics::VulkanContext, material::Material, renderer::CustomVertex};
 
 use super::{Transform, geometry::Geometry};
 
 impl super::Scene {
     /// Imports a GLTF file and adds it to the scene.
+    /// https://user-images.githubusercontent.com/7414478/43995082-c2e1559a-9d75-11e8-93de-9e9f6949a4ae.PNG
     pub fn import_gltf(
         &mut self,
         path: &std::path::Path,
@@ -23,6 +24,8 @@ impl super::Scene {
                     transform.scale = glam::Vec3::from(scale);
 
                     for primitive in mesh.primitives() {
+                        let material = Material::from_gltf(primitive.material(), self, context);
+
                         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
                         let indices = if let Some(indices_reader) = reader.read_indices() {
@@ -80,7 +83,7 @@ impl super::Scene {
                         let geometry = Geometry::create(vertices, indices, self, context)?;
 
                         // Create a new entity with the geometry and transform components
-                        self.world.push((geometry, transform));
+                        self.world.push((geometry, transform, material));
                     }
                 }
             }

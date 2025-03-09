@@ -30,7 +30,11 @@ pub struct Geometry {
     pub vertex_count: u32,
     pub index_count: u32,
     pub dynamic: Option<DynamicGeometryData>,
-    pub shared_buffer_offsets: shaders::Offsets,
+
+    _shared_vertex_buffer_offset: u64,
+    _shared_vertex_buffer_count: u64,
+    _shared_index_buffer_offset: u64,
+    _shared_index_buffer_count: u64,
 }
 
 #[derive(Clone)]
@@ -78,16 +82,28 @@ impl Geometry {
             blas,
             vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
-            shared_buffer_offsets: shaders::Offsets {
-                vertex_offset: vertices_start as u32,
-                vertex_count: vertices_end as u32 - vertices_start as u32,
-                material_offset: 0,
-                material_count: 0,
-                index_offset: index_start as u32,
-                index_count: index_end as u32 - index_start as u32,
-            },
+            _shared_vertex_buffer_offset: vertices_start,
+            _shared_vertex_buffer_count: vertices_end - vertices_start,
+            _shared_index_buffer_offset: index_start,
+            _shared_index_buffer_count: index_end - index_start,
             dynamic: None,
         })
+    }
+
+    /// Returns (vertex_offset, vertex_count)
+    pub fn get_shared_vertex_buffer_offsets(&self) -> (u64, u64) {
+        (
+            self._shared_vertex_buffer_offset,
+            self._shared_vertex_buffer_count,
+        )
+    }
+
+    /// Returns (index_offset, index_count)
+    pub fn get_shared_index_buffer_offsets(&self) -> (u64, u64) {
+        (
+            self._shared_index_buffer_offset,
+            self._shared_index_buffer_count,
+        )
     }
 }
 

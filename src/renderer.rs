@@ -40,7 +40,7 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-use crate::scene::{Transform, geometry::Geometry};
+use crate::{material::Material, scene::{geometry::Geometry, Transform}};
 
 pub mod shaders {
     use super::CustomVertex;
@@ -483,18 +483,30 @@ impl Renderer {
         let mut blas_instances = vec![];
 
         use legion::IntoQuery;
-        let mut query = <(&mut Geometry, &mut Transform)>::query();
-        let mut offsets = vec![];
+        let mut query = <(&mut Geometry, &mut Transform, &Material)>::query();
+        let mut offsets_vec = vec![];
         // TODO: If the number of meshes doesn't change, we can just update the TLAS
-        for (geometry, transform) in query.iter_mut(&mut self.scene.world) {
+        for (geometry, transform, material) in query.iter_mut(&mut self.scene.world) {
             let show_percentage = 100.0;
             let rng = rand::rng().random_range(0.0..100.0);
             if rng > show_percentage {
                 continue;
             }
 
-            let offset_idx = offsets.len();
-            offsets.push(geometry.shared_buffer_offsets);
+            let offset_idx = offsets_vec.len();
+            let (vertex_offset, vertex_count) = geometry.get_shared_vertex_buffer_offsets();
+            let (index_offset, index_count) = geometry.get_shared_index_buffer_offsets();
+            let material_offset = material.get_shared_buffer_offset();
+
+            let offsets = shaders::Offsets {
+                vertex_offset: vertex_offset as u32,
+                vertex_count: vertex_count as u32,
+                material_offset: material_offset as u32,
+                padding: 0,
+                index_offset: index_offset as u32,
+                index_count: index_count as u32,
+            };
+            offsets_vec.push(offsets);
 
             // TODO Only build if dynamic and necessary
             // Find a way to update and not rebuild the whole thing
@@ -513,7 +525,7 @@ impl Renderer {
 
         // Update the offsets buffer with the new offsets
         self.scene.update_shared_offsets_buffer(
-            &offsets,
+            &offsets_vec,
             context,
         );
 

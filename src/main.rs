@@ -1,3 +1,9 @@
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use egui_winit_vulkano::egui::{self, Image};
 use path_tracer::{
     graphics::VulkanContext,
     renderer::{CustomVertex, Renderer},
@@ -7,6 +13,10 @@ use simple_logger::SimpleLogger;
 use vulkano::{
     Validated, VulkanError,
     command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage},
+    image::{
+        ImageAspects, ImageSubresourceRange, ImageUsage,
+        view::{ImageView, ImageViewCreateInfo, ImageViewType},
+    },
     swapchain::{SwapchainPresentInfo, acquire_next_image},
     sync::GpuFuture,
 };
@@ -34,9 +44,48 @@ fn main() {
     event_loop.run_app(&mut app).unwrap();
 }
 
+pub struct AppStats {
+    pub last_second_delta_time: Duration,
+
+    _last_deltas: Vec<f32>,
+    _last_second: Instant,
+    _last_frame_start: Instant,
+}
+
+impl AppStats {
+    pub fn new() -> Self {
+        Self {
+            last_second_delta_time: Duration::ZERO,
+            _last_deltas: Vec::new(),
+            _last_second: Instant::now(),
+            _last_frame_start: Instant::now(),
+        }
+    }
+
+    pub fn update_frame_start(&mut self) {
+        let delta_time = self._last_frame_start.elapsed().as_secs_f32();
+        self._last_deltas.push(delta_time);
+        self._last_frame_start = Instant::now();
+
+        if self._last_second.elapsed().as_secs_f32() > 1.0 {
+            self.last_second_delta_time = Duration::from_secs_f32(
+                self._last_deltas.iter().sum::<f32>() / self._last_deltas.len() as f32,
+            );
+
+            self._last_deltas.clear();
+            self._last_second = Instant::now();
+        }
+    }
+}
+
 pub struct App {
     pub context: Option<VulkanContext>,
     pub renderer: Option<Renderer>,
+
+    pub gui: Option<egui_winit_vulkano::Gui>,
+
+    stats: AppStats,
+
     _queue_recreate_swapchain: bool,
 }
 
@@ -45,8 +94,36 @@ impl App {
         Self {
             context: None,
             renderer: None,
+            gui: None,
+            stats: AppStats::new(),
             _queue_recreate_swapchain: false,
         }
+    }
+
+    pub fn gui(&mut self) {
+        self.gui.as_mut().unwrap().immediate_ui(|gui| {
+            let ctx = gui.context();
+
+            egui::Window::new("Settings")
+                .resizable(true)
+                .default_width(300.0)
+                .show(&ctx, |ui| {
+                    ui.label(format!(
+                        "FPS: {:.2}",
+                        1.0 / self.stats.last_second_delta_time.as_secs_f32()
+                    ));
+
+                    ui.label(format!(
+                        "Delta Time: {:.2?}",
+                        self.stats.last_second_delta_time
+                    ));
+
+                    ui.label(format!(
+                        "Entities: {}",
+                        self.renderer.as_ref().unwrap().scene.world.len()
+                    ));
+                });
+        });
     }
 }
 
@@ -62,6 +139,18 @@ impl ApplicationHandler for App {
             .expect("Failed to create window");
 
         self.context = Some(VulkanContext::new(window));
+        let context = self.context.as_ref().unwrap();
+        self.gui = Some(egui_winit_vulkano::Gui::new(
+            &event_loop,
+            context.surface.clone(),
+            context.queue.clone(),
+            context.swapchain.image_format(),
+            egui_winit_vulkano::GuiConfig {
+                allow_srgb_render_target: true,
+                is_overlay: true,
+                ..Default::default()
+            },
+        ));
 
         let mut renderer = Renderer::new(&self.context.as_ref().unwrap());
 
@@ -75,76 +164,6 @@ impl ApplicationHandler for App {
             )
             .unwrap();
 
-        let transform = Transform::default();
-
-        let vertices = vec![
-            CustomVertex {
-                position: [-0.5, -0.25, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [0.5, 1.0].into(),
-            },
-            CustomVertex {
-                position: [0.0, 0.5, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [0.5, 1.0].into(),
-            },
-            CustomVertex {
-                position: [0.25, -0.1, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [0.5, 1.0].into(),
-            },
-        ];
-
-        let indices = vec![0, 1, 2];
-
-        let geometry = Geometry::create(
-            vertices,
-            indices,
-            &mut renderer.scene,
-            self.context.as_ref().unwrap(),
-        )
-        .unwrap();
-
-        renderer.scene.world.push((geometry, transform));
-
-        let small_rect_vertices = vec![
-            CustomVertex {
-                position: [-0.5, -0.1, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [0.5, 1.0].into(),
-            },
-            CustomVertex {
-                position: [0.5, -0.1, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [1.5, 1.0].into(),
-            },
-            CustomVertex {
-                position: [0.5, 0.1, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [1.5, 2.5].into(),
-            },
-            CustomVertex {
-                position: [-0.5, 0.1, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [1.5, 2.5].into(),
-            },
-        ];
-
-        let small_rect_indices = vec![0, 1, 2, 0, 2, 3];
-
-        let small_rect_geometry = Geometry::create(
-            small_rect_vertices,
-            small_rect_indices,
-            &mut renderer.scene,
-            self.context.as_ref().unwrap(),
-        )
-        .unwrap();
-        let small_rect_transform = Transform::default();
-
-        renderer
-            .scene
-            .world
-            .push((small_rect_geometry, small_rect_transform));
         log::info!("GLTF scene loaded");
 
         self.renderer = Some(renderer);
@@ -156,6 +175,10 @@ impl ApplicationHandler for App {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        if self.gui.as_mut().unwrap().update(&event) {
+            return;
+        };
+
         match event {
             WindowEvent::Resized(size) => {
                 if let Some(context) = &mut self.context {
@@ -169,6 +192,10 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
+                self.stats.update_frame_start();
+
+                self.gui();
+
                 let context = self.context.as_mut().unwrap();
                 let renderer = self.renderer.as_mut().unwrap();
 
@@ -214,7 +241,39 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .join(acquire_future)
                     .then_execute(context.queue.clone(), command_buffer)
-                    .unwrap()
+                    .unwrap();
+
+                let swapchain_image = renderer.swapchain_image_sets[image_index as usize]
+                    .0
+                    .image();
+
+                let mut after_gui_future = self.gui.as_mut().unwrap().draw_on_image(
+                    future,
+                    ImageView::new(
+                        swapchain_image.clone(),
+                        ImageViewCreateInfo {
+                            usage: ImageUsage::COLOR_ATTACHMENT,
+                            view_type: ImageViewType::Dim2d,
+                            format: context.swapchain.image_format(),
+                            subresource_range: ImageSubresourceRange {
+                                aspects: ImageAspects::COLOR,
+                                mip_levels: 0..1,
+                                array_layers: 0..1,
+                            },
+
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+                );
+
+                after_gui_future.cleanup_finished();
+
+                // self.gui.as_mut().unwrap().
+
+                // let after_gui_future = future;
+
+                let future = after_gui_future
                     .then_swapchain_present(
                         context.queue.clone(),
                         SwapchainPresentInfo::swapchain_image_index(
@@ -239,6 +298,9 @@ impl ApplicationHandler for App {
                             Some(vulkano::sync::now(context.device.clone()).boxed());
                     }
                 }
+
+                // Prevent background processing that might mess with buffers
+                context.wait_for_previous_frame_end();
             }
             WindowEvent::KeyboardInput {
                 device_id,
@@ -260,6 +322,12 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if let Some(context) = &mut self.context {
+            context.winit.request_redraw();
         }
     }
 }

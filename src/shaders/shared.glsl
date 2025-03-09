@@ -9,7 +9,7 @@ struct Offsets {
     uint vertex_offset;
     uint vertex_count;
     uint material_offset;
-    uint material_count;
+    uint padding;
     uint index_offset;
     uint index_count;
 };
@@ -19,9 +19,9 @@ struct Offsets {
 // };
 
 struct Material {
-    vec3 albedo;
+    vec4 base_color;
     float metallic;
     float roughness;
-    float alpha;
-    vec3 emissive;
+    float padding_a;
+    float padding_b;
 };

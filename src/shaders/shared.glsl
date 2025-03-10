@@ -20,8 +20,11 @@ struct Offsets {
 
 struct Material {
     vec4 base_color;
+    // TODO: Make this a bitflag type
+    // to support all textures
+    // with just one 32-bit integer
+    bool has_base_texture;
+    uint base_texture_indice;
     float metallic;
     float roughness;
-    float padding_a;
-    float padding_b;
 };

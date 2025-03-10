@@ -19,7 +19,7 @@ use vulkano::{
     format::Format,
     image::{
         Image, ImageCreateFlags, ImageCreateInfo, ImageFormatInfo, ImageType, ImageUsage,
-        sampler::{Sampler, SamplerCreateInfo},
+        sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo},
         view::ImageView,
     },
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
@@ -40,6 +40,7 @@ pub struct VulkanContext {
     pub command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     pub memory_allocator: Arc<StandardMemoryAllocator>,
     pub descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    pub descriptor_set_allocator_update_after_bind: Arc<StandardDescriptorSetAllocator>,
 
     pub winit: Arc<winit::window::Window>,
     pub surface: Arc<Surface>,
@@ -86,6 +87,10 @@ impl VulkanContext {
             khr_synchronization2: true,
             khr_deferred_host_operations: true,
             khr_acceleration_structure: true,
+
+            // Bindless textures
+            ext_descriptor_indexing: true,
+            khr_maintenance3: true,
             ..DeviceExtensions::empty()
         };
 
@@ -94,7 +99,16 @@ impl VulkanContext {
             ray_tracing_pipeline: true,
             buffer_device_address: true,
             synchronization2: true,
-            ..Default::default()
+
+            // Bindless
+            descriptor_binding_partially_bound: true,
+            descriptor_binding_variable_descriptor_count: true,
+            descriptor_binding_sampled_image_update_after_bind: true,
+            shader_sampled_image_array_dynamic_indexing: true,
+            shader_sampled_image_array_non_uniform_indexing: true,
+            runtime_descriptor_array: true, 
+
+            ..DeviceFeatures::empty()
         };
 
         let physical_device = instance
@@ -237,6 +251,14 @@ impl VulkanContext {
             },
         ));
 
+        let descriptor_set_allocator_update_after_bind = Arc::new(StandardDescriptorSetAllocator::new(
+            device.clone(),
+            StandardDescriptorSetAllocatorCreateInfo {
+                update_after_bind: true,
+                ..Default::default()
+            },
+        ));
+
         let previous_frame_end = Some(vulkano::sync::now(device.clone()).boxed());
 
         Self {
@@ -246,6 +268,7 @@ impl VulkanContext {
             command_buffer_allocator,
             memory_allocator,
             descriptor_set_allocator,
+            descriptor_set_allocator_update_after_bind,
 
             winit,
             surface,
@@ -283,12 +306,15 @@ pub struct Texture {
     pub image: Arc<Image>,
     pub image_view: Arc<ImageView>,
     pub sampler: Arc<Sampler>,
+
+    pub bindless_indice: u32,
 }
 
 impl Texture {
     pub fn from_gltf(
         image: gltf::image::Data,
         sampler: gltf::texture::Sampler,
+        renderer: &mut Renderer,
         context: &VulkanContext,
     ) -> Self {
         let format = Self::map_gltf_format_to_vulkan(image.format);
@@ -341,6 +367,13 @@ impl Texture {
 
         let image_view = ImageView::new_default(image.clone()).unwrap();
 
+        let mag = sampler.mag_filter();
+        let min = sampler.min_filter();
+        let address_mode_u = sampler.wrap_s();
+        let address_mode_v = sampler.wrap_t();
+
+        // TODO
+
         let sampler = Sampler::new(
             context.device.clone(),
             SamplerCreateInfo {
@@ -349,18 +382,23 @@ impl Texture {
         )
         .unwrap();
 
-        let _ = uploader
+        let future = uploader
             .build()
             .unwrap()
             .execute(context.queue.clone())
             .unwrap();
 
         // TODO: Wait to finish?
+        future.flush().unwrap();
+
+        let texture_index = renderer.add_texture(image_view.clone(), sampler.clone(), context);
 
         Self {
             image,
             image_view,
             sampler,
+
+            bindless_indice: texture_index,
         }
     }
 

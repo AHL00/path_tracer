@@ -18,14 +18,14 @@ use vulkano::{
         PrimaryCommandBufferAbstract,
     },
     descriptor_set::{
-        DescriptorSet, WriteDescriptorSet,
+        self, DescriptorSet, WriteDescriptorSet,
         layout::{
-            DescriptorSetLayout, DescriptorSetLayoutBinding, DescriptorSetLayoutCreateInfo,
-            DescriptorType,
+            DescriptorBindingFlags, DescriptorSetLayout, DescriptorSetLayoutBinding,
+            DescriptorSetLayoutCreateFlags, DescriptorSetLayoutCreateInfo, DescriptorType,
         },
     },
     format::Format,
-    image::{Image, view::ImageView},
+    image::{Image, sampler::Sampler, view::ImageView},
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
         PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
@@ -40,7 +40,11 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-use crate::{material::Material, scene::{geometry::Geometry, Transform}};
+use crate::{
+    graphics::VulkanContext,
+    material::Material,
+    scene::{Transform, geometry::Geometry},
+};
 
 pub mod shaders {
     use super::CustomVertex;
@@ -123,11 +127,23 @@ pub struct Renderer {
     // Idk how to make a tlas without a blas for now
     _blas: Arc<AccelerationStructure>,
     pub tlas: Arc<AccelerationStructure>,
+
+    // Bindless textures descriptor set
+    pub bindless_textures_descriptor_set: Arc<DescriptorSet>,
+    /// This is basically a CPU side
+    /// version of the bindless textures descriptor set.
+    /// It's used when updating the descriptor set because
+    /// the entire array must be updated at once.
+    bindless_textures: Vec<(Arc<ImageView>, Arc<Sampler>)>,
+    bindless_texture_index: u32,
+
     pub uniform_buffer: Subbuffer<shaders::raygen::Camera>,
     pub scene: crate::scene::Scene,
 }
 
 impl Renderer {
+    const MAX_TEXTURE_COUNT: u32 = 1024; // Maximum number of textures
+
     pub fn new(context: &crate::graphics::VulkanContext) -> Self {
         let pipeline_layout = PipelineLayout::new(
             context.device.clone(),
@@ -246,6 +262,29 @@ impl Renderer {
                             ]
                             .into_iter()
                             .collect(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
+                    // Bindless texture descriptor set
+                    DescriptorSetLayout::new(
+                        context.device.clone(),
+                        DescriptorSetLayoutCreateInfo {
+                            bindings: [(
+                                0,
+                                DescriptorSetLayoutBinding {
+                                    stages: ShaderStages::CLOSEST_HIT | ShaderStages::ANY_HIT,
+                                    descriptor_count: Self::MAX_TEXTURE_COUNT,
+                                    binding_flags: DescriptorBindingFlags::UPDATE_AFTER_BIND
+                                        | DescriptorBindingFlags::PARTIALLY_BOUND,
+                                    ..DescriptorSetLayoutBinding::descriptor_type(
+                                        DescriptorType::CombinedImageSampler,
+                                    )
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            flags: DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL,
                             ..Default::default()
                         },
                     )
@@ -421,12 +460,23 @@ impl Renderer {
 
         log::info!("Shader binding table created");
 
+        let bindless_textures_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator_update_after_bind.clone(),
+            pipeline_layout.set_layouts().get(3).unwrap().clone(),
+            [],
+            [],
+        )
+        .unwrap();
+
         Self {
             pipeline_layout,
             pipeline,
             rgen_descriptor_set,
             swapchain_image_sets,
             shader_binding_table,
+            bindless_textures_descriptor_set,
+            bindless_textures: vec![],
+            bindless_texture_index: 0,
 
             _blas: blas.clone(),
             tlas,
@@ -472,6 +522,36 @@ impl Renderer {
         .unwrap();
 
         self.rgen_descriptor_set = descriptor_set;
+    }
+
+    /// Add a texture to the global pool, returning the index of the texture
+    /// in the bindless texture descriptor set.
+    pub fn add_texture(
+        &mut self,
+        image: Arc<ImageView>,
+        sampler: Arc<Sampler>,
+        context: &VulkanContext,
+    ) -> u32 {
+        let index = self.bindless_texture_index;
+        self.bindless_textures
+            .push((image.clone(), sampler.clone()));
+
+        let write_descriptor_set =
+            WriteDescriptorSet::image_view_sampler_array(0, 0, self.bindless_textures.clone());
+
+        unsafe {
+            self.bindless_textures_descriptor_set
+                .update_by_ref([write_descriptor_set], [])
+                .unwrap()
+        };
+
+        self.bindless_texture_index += 1;
+
+        if self.bindless_texture_index >= Self::MAX_TEXTURE_COUNT {
+            panic!("Bindless texture index out of bounds");
+        }
+
+        index
     }
 
     pub fn record_commands(
@@ -524,10 +604,8 @@ impl Renderer {
         }
 
         // Update the offsets buffer with the new offsets
-        self.scene.update_shared_offsets_buffer(
-            &offsets_vec,
-            context,
-        );
+        self.scene
+            .update_shared_offsets_buffer(&offsets_vec, context);
 
         self.tlas = unsafe { build_top_level_acceleration_structure(blas_instances, context) };
 
@@ -543,6 +621,7 @@ impl Renderer {
                     self.rgen_descriptor_set.clone(),
                     self.swapchain_image_sets[image_index as usize].1.clone(),
                     self.scene.rhit_descriptor_set.clone(),
+                    self.bindless_textures_descriptor_set.clone(),
                 ],
             )
             .unwrap()

@@ -1,5 +1,6 @@
 #version 460
 #extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(location = 0) rayPayloadInEXT vec3 hit_value;
 hitAttributeEXT vec2 attribs;
@@ -21,6 +22,8 @@ layout(binding = 2, set = 2) readonly buffer material_buffer {
 layout(binding = 3, set = 2) readonly buffer index_buffer {
     uint indices[];
 };
+
+layout(binding = 0, set = 3) uniform sampler2D textures[];
 
 void main() {
     Offsets offsets = offsets_array[gl_InstanceCustomIndexEXT];
@@ -54,7 +57,15 @@ void main() {
 
     Material material = materials[offsets.material_offset];
     
-    hit_value = normal;
+    // hit_value = normal;
+    // hit_value = vec3(0.0, material.base_texture_indice / 255.0, 0.0);
+    if (material.has_base_texture) {
+        // The nonuniformEXT is required for dynamic indexing
+        vec4 texture_color = texture(textures[nonuniformEXT(material.base_texture_indice)], uv);
+        hit_value = texture_color.xyz;
+    } else {
+        hit_value = material.base_color.xyz;
+    }
     // hit_value = material.base_color.xyz;
     // hit_value = vec3(uv.x, uv.y, 0.0);
 }

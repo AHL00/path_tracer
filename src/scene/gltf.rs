@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{graphics::VulkanContext, material::Material, renderer::CustomVertex};
+use crate::{graphics::VulkanContext, material::Material, renderer::{CustomVertex, Renderer}};
 
 use super::{Transform, geometry::Geometry};
 
@@ -8,7 +8,7 @@ impl super::Scene {
     /// Imports a GLTF file and adds it to the scene.
     /// https://user-images.githubusercontent.com/7414478/43995082-c2e1559a-9d75-11e8-93de-9e9f6949a4ae.PNG
     pub fn import_gltf(
-        &mut self,
+        renderer: &mut Renderer,
         path: &std::path::Path,
         context: &VulkanContext,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +39,7 @@ impl super::Scene {
                         let gltf_mat = primitive.material();
 
                         let material =
-                            Material::from_gltf(gltf_mat, self, context, &buffers, &gltf_dir);
+                            Material::from_gltf(gltf_mat, renderer, context, &buffers, &gltf_dir);
 
                         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
@@ -95,10 +95,10 @@ impl super::Scene {
                             })
                             .collect();
 
-                        let geometry = Geometry::create(vertices, indices, self, context)?;
+                        let geometry = Geometry::create(vertices, indices, &mut renderer.scene, context)?;
 
                         // Create a new entity with the geometry and transform components
-                        self.world.push((geometry, transform, material));
+                        renderer.scene.world.push((geometry, transform, material));
                     }
                 }
             }

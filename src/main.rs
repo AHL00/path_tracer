@@ -7,7 +7,7 @@ use egui_winit_vulkano::egui::{self, Image};
 use path_tracer::{
     graphics::VulkanContext,
     renderer::{CustomVertex, Renderer},
-    scene::{Transform, geometry::Geometry},
+    scene::{geometry::Geometry, Scene, Transform},
 };
 use simple_logger::SimpleLogger;
 use vulkano::{
@@ -156,13 +156,12 @@ impl ApplicationHandler for App {
 
         log::info!("Loading GLTF scene...");
 
-        renderer
-            .scene
-            .import_gltf(
-                std::path::Path::new("./assets/sponza/Sponza.gltf"),
-                &self.context.as_ref().unwrap(),
-            )
-            .unwrap();
+        Scene::import_gltf(
+            &mut renderer,
+            std::path::Path::new("./assets/sponza/Sponza.gltf"),
+            &self.context.as_ref().unwrap(),
+        )
+        .unwrap();
 
         log::info!("GLTF scene loaded");
 

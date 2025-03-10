@@ -28,3 +28,12 @@ struct Material {
     float metallic;
     float roughness;
 };
+
+struct RayPayload {
+    vec3 hit_value;
+    uint depth;
+    vec3 attenuation;
+    int done;
+    vec3 origin;
+    vec3 direction;
+};

@@ -28,7 +28,7 @@ use vulkano::{
     image::{Image, sampler::Sampler, view::ImageView},
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
-        PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
+        PipelineBindPoint, PipelineCreateFlags, PipelineLayout, PipelineShaderStageCreateInfo,
         graphics::vertex_input::Vertex,
         layout::PipelineLayoutCreateInfo,
         ray_tracing::{
@@ -143,6 +143,7 @@ pub struct Renderer {
 
 impl Renderer {
     const MAX_TEXTURE_COUNT: u32 = 1024; // Maximum number of textures
+    const RAY_RECURSION_DEPTH: u32 = 2; // Maximum number of ray recursion depth
 
     pub fn new(context: &crate::graphics::VulkanContext) -> Self {
         let pipeline_layout = PipelineLayout::new(
@@ -156,7 +157,10 @@ impl Renderer {
                                 (
                                     0,
                                     DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::RAYGEN,
+                                        stages: ShaderStages::RAYGEN
+                                            | ShaderStages::CLOSEST_HIT
+                                            | ShaderStages::ANY_HIT
+                                            | ShaderStages::INTERSECTION,
                                         ..DescriptorSetLayoutBinding::descriptor_type(
                                             DescriptorType::AccelerationStructure,
                                         )
@@ -335,7 +339,7 @@ impl Renderer {
                 RayTracingPipelineCreateInfo {
                     stages: stages.into_iter().collect(),
                     groups: groups.into_iter().collect(),
-                    max_pipeline_ray_recursion_depth: 1,
+                    max_pipeline_ray_recursion_depth: Self::RAY_RECURSION_DEPTH,
                     ..RayTracingPipelineCreateInfo::layout(pipeline_layout.clone())
                 },
             )

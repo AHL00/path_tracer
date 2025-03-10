@@ -1,13 +1,10 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use egui_winit_vulkano::egui::{self, Image};
+use egui_winit_vulkano::egui::{self};
 use path_tracer::{
     graphics::VulkanContext,
-    renderer::{CustomVertex, Renderer},
-    scene::{geometry::Geometry, Scene, Transform},
+    renderer::Renderer,
+    scene::Scene,
 };
 use simple_logger::SimpleLogger;
 use vulkano::{
@@ -22,8 +19,8 @@ use vulkano::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, Size},
-    event::{KeyEvent, WindowEvent},
+    dpi::LogicalSize,
+    event::WindowEvent,
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
     window::WindowAttributes,

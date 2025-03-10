@@ -40,6 +40,13 @@ impl Material {
         let metallic = gltf_mat.pbr_metallic_roughness().metallic_factor();
         let roughness = gltf_mat.pbr_metallic_roughness().roughness_factor();
 
+//         log::info!("
+// Material name: {}
+// Base color: {:?}
+// Metallic: {}
+// Roughness: {}
+//         ", name, base_color, metallic, roughness);
+
         let texture = base_texture_info.map(|info| {
             let image_source = info.texture().source().source();
             let sampler = info.texture().sampler();

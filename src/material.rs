@@ -26,6 +26,10 @@ impl PartialEq for Material {
         self._id == other._id
     }
 }
+
+//TODO: Shared textures are likely loaded multiple times
+// Figure out a way to figure out whether a GLTF texture is already loaded and
+// retrieve it from the pool.
 impl Material {
     pub fn from_gltf<'a>(
         gltf_mat: gltf::Material<'a>,
@@ -40,27 +44,33 @@ impl Material {
         let metallic = gltf_mat.pbr_metallic_roughness().metallic_factor();
         let roughness = gltf_mat.pbr_metallic_roughness().roughness_factor();
 
-//         log::info!("
-// Material name: {}
-// Base color: {:?}
-// Metallic: {}
-// Roughness: {}
-//         ", name, base_color, metallic, roughness);
-
         let texture = base_texture_info.map(|info| {
             let image_source = info.texture().source().source();
             let sampler = info.texture().sampler();
 
+            let image_ident;
+            match &image_source {
+                gltf::image::Source::View { view, .. } => {
+                    // TODO: Not sure if this will return unique
+                    // indexes if in a shared buffer
+                    log::warn!("Using view index as image identifier, not sure if this is working yet!");
+                    image_ident = format!("gltf_buffer_{}", view.index());
+                }
+                gltf::image::Source::Uri { uri, .. } => {
+                    image_ident = format!("gltf_{}", uri);
+                }
+            }
+
             let data =
                 gltf::image::Data::from_source(image_source, Some(gltf_path), buffers).unwrap();
 
-            Texture::from_gltf(data, sampler, renderer, context)
+            Texture::from_gltf(data, image_ident, sampler, renderer, context)
         });
 
         let shader_mat = shaders::Material {
             base_color,
             has_base_texture: texture.is_some() as u32,
-            base_texture_indice: texture.as_ref().map_or(0, |t| t.bindless_indice),
+            base_texture_indice: texture.as_ref().map_or(0, |t| t.bindless_indice()),
             metallic: metallic,
             roughness: roughness,
         };

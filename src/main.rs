@@ -28,7 +28,7 @@ use winit::{
 
 fn main() {
     SimpleLogger::new()
-        .with_level(log::LevelFilter::Info)
+        .with_level(log::LevelFilter::Debug)
         .without_timestamps()
         .with_module_level("vulkano", log::LevelFilter::Warn)
         .init()
@@ -119,6 +119,16 @@ impl App {
                         "Entities: {}",
                         self.renderer.as_ref().unwrap().scene.world.len()
                     ));
+
+                    ui.label(format!(
+                        "Meshes: {}",
+                        self.renderer.as_ref().unwrap().scene.geometries_map.len()
+                    ));
+
+                    ui.label(format!(
+                        "Textures: {}",
+                        self.renderer.as_ref().unwrap().loaded_textures_map.len()
+                    ));
                 });
         });
     }
@@ -153,12 +163,26 @@ impl ApplicationHandler for App {
 
         log::info!("Loading GLTF scene...");
 
+        // Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/sponza/Sponza.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        // )
+        // .unwrap();
+
         Scene::import_gltf(
             &mut renderer,
-            std::path::Path::new("./assets/sponza/Sponza.gltf"),
+            std::path::Path::new("./assets/bistro/bistro.gltf"),
             &self.context.as_ref().unwrap(),
         )
         .unwrap();
+
+        // Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/cornell/cornell_box.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        // )
+        // .unwrap();
 
         log::info!("GLTF scene loaded");
 

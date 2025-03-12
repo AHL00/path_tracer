@@ -1,6 +1,10 @@
-use std::collections::HashMap;
+use std::{cell::{LazyCell, RefCell}, collections::HashMap, sync::LazyLock};
 
-use crate::{graphics::VulkanContext, material::Material, renderer::{CustomVertex, Renderer}};
+use crate::{
+    graphics::VulkanContext,
+    material::Material,
+    renderer::{CustomVertex, Renderer},
+};
 
 use super::{Transform, geometry::Geometry};
 
@@ -42,6 +46,15 @@ impl super::Scene {
                             Material::from_gltf(gltf_mat, renderer, context, &buffers, &gltf_dir);
 
                         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+
+                        let buffer_source = std::rc::Rc::new(RefCell::new(None));
+                        let _reader = primitive.reader(|buffer| {
+                            *buffer_source.borrow_mut() = Some(buffer.source());
+                            None
+                        });
+                        _reader.read_positions();
+                        
+                        let buffer_source = buffer_source.borrow().as_ref().expect("Buffer source should be available").clone();
 
                         let indices = if let Some(indices_reader) = reader.read_indices() {
                             indices_reader.into_u32().collect::<Vec<_>>()
@@ -95,7 +108,14 @@ impl super::Scene {
                             })
                             .collect();
 
-                        let geometry = Geometry::create(vertices, indices, &mut renderer.scene, context)?;
+                        let ident = format!(
+                            "{}_{}",
+                            mesh.name().unwrap_or(&format!("{}", mesh.index())),
+                            primitive.index()
+                        );
+
+                        let geometry =
+                            Geometry::create(ident, vertices, indices, &mut renderer.scene, context)?;
 
                         // Create a new entity with the geometry and transform components
                         renderer.scene.world.push((geometry, transform, material));

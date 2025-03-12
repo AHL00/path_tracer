@@ -303,16 +303,35 @@ impl VulkanContext {
 #[derive(Debug, Clone)]
 /// Texture struct containing image, image view and sampler
 pub struct Texture {
-    pub image: Arc<Image>,
-    pub image_view: Arc<ImageView>,
-    pub sampler: Arc<Sampler>,
+    image: Arc<Image>,
+    image_view: Arc<ImageView>,
+    sampler: Arc<Sampler>,
 
-    pub bindless_indice: u32,
+    bindless_indice: u32,
 }
 
 impl Texture {
+    pub fn bindless_indice(&self) -> u32 {
+        self.bindless_indice
+    }
+
+    pub fn image(&self) -> Arc<Image> {
+        self.image.clone()
+    }
+
+    pub fn image_view(&self) -> Arc<ImageView> {
+        self.image_view.clone()
+    }
+
+    pub fn sampler(&self) -> Arc<Sampler> {
+        self.sampler.clone()
+    }
+
+    /// The image ident must be unique to each image source. It is used to
+    /// look up whether the image is already loaded.
     pub fn from_gltf(
         image: gltf::image::Data,
+        image_ident: String,
         sampler: gltf::texture::Sampler,
         renderer: &mut Renderer,
         context: &VulkanContext,
@@ -320,6 +339,12 @@ impl Texture {
         let format = Self::map_gltf_format_to_vulkan(image.format);
         let extent = [image.width, image.height, 1];
         let pixels = Self::map_gltf_image_data_to_vulkan(image.format, image.pixels);
+        let mb_size = pixels.len() as f32 / 1024.0 / 1024.0;
+
+        // Try looking up the image in the renderer
+        if let Some(texture) = renderer.lookup_texture(&image_ident) {
+            return texture;
+        }
 
         let staging_buffer = Buffer::from_iter(
             context.memory_allocator.clone(),
@@ -393,13 +418,18 @@ impl Texture {
 
         let texture_index = renderer.add_texture(image_view.clone(), sampler.clone(), context);
 
-        Self {
+        let texture = Self {
             image,
             image_view,
             sampler,
 
             bindless_indice: texture_index,
-        }
+        };
+
+        renderer.add_texture_to_lookup_map(image_ident.clone(), texture.clone());
+        log::debug!("Texture loaded: {}, {}x{}, {}mb", image_ident, extent[0], extent[1], mb_size);
+
+        texture
     }
 
     fn map_gltf_format_to_vulkan(format: gltf::image::Format) -> Format {

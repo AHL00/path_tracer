@@ -36,10 +36,12 @@ void main() {
     payload.done = 1;
     payload.origin = origin.xyz;
     payload.direction = direction.xyz; 
+    payload.in_uv = in_uv;
 
     vec3 hit_value = vec3(0);
     for(;;)
     {
+        vec3 this_attenuation = payload.attenuation;
         traceRayEXT(
             top_level_as,  // acceleration structure
             ray_flags,     // rayFlags
@@ -53,7 +55,8 @@ void main() {
             t_max,         // ray max range
             0              // payload (location 0)
         );      
-        hit_value += payload.hit_value * payload.attenuation;
+        hit_value += payload.hit_value * this_attenuation;
+        // hit_value = payload.hit_value;
 
         payload.depth++;
         if(payload.done == 1 || payload.depth >= MAX_DEPTH)

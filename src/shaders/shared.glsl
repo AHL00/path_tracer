@@ -36,4 +36,5 @@ struct RayPayload {
     int done;
     vec3 origin;
     vec3 direction;
+    vec2 in_uv;
 };

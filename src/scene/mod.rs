@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use vulkano::{
     buffer::{Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsage, Subbuffer},
@@ -36,6 +36,8 @@ pub struct Scene {
     pub material_offset: u64,
     pub shared_index_buffer: Subbuffer<[u32]>,
     pub index_offset: u64,
+
+    pub geometries_map: HashMap<String, geometry::Geometry>,
 }
 
 impl Scene {
@@ -43,11 +45,11 @@ impl Scene {
     /// In elements
     const SHARED_OFFSETS_BUFFER_SIZE: u64 = 10000;
     /// In elements
-    const SHARED_VERTEX_BUFFER_SIZE: u64 = 500000;
+    const SHARED_VERTEX_BUFFER_SIZE: u64 = 2500000;
     /// In elements
-    const SHARED_MATERIAL_BUFFER_SIZE: u64 = 1024;
+    const SHARED_MATERIAL_BUFFER_SIZE: u64 = 10000;
     /// In elements
-    const SHARED_INDEX_BUFFER_SIZE: u64 = 1000000;
+    const SHARED_INDEX_BUFFER_SIZE: u64 = 5000000;
 
     pub fn new(
         context: &VulkanContext,
@@ -60,6 +62,20 @@ impl Scene {
         //     Offsets offsets_array[];
         // };
 
+        log::info!(
+            "Max buffer size: {:?}",
+            context
+                .device
+                .physical_device()
+                .properties()
+                .max_buffer_size
+        );
+
+        log::info!(
+            "Shared offsets buffer size: {:?} bytes",
+            Self::SHARED_OFFSETS_BUFFER_SIZE as u64
+                * std::mem::size_of::<shaders::Offsets>() as u64
+        );
         let shared_offsets_buffer: Subbuffer<[shaders::Offsets]> = Buffer::new_slice(
             context.memory_allocator.clone(),
             BufferCreateInfo {
@@ -72,8 +88,7 @@ impl Scene {
             AllocationCreateInfo {
                 ..Default::default()
             },
-            Self::SHARED_OFFSETS_BUFFER_SIZE as u64
-                * std::mem::size_of::<shaders::Offsets>() as u64,
+            Self::SHARED_OFFSETS_BUFFER_SIZE,
         )
         .unwrap();
 
@@ -81,6 +96,10 @@ impl Scene {
         //     Vertex vertices[];
         // };
 
+        log::info!(
+            "Shared vertex buffer size: {:?} bytes",
+            Self::SHARED_VERTEX_BUFFER_SIZE as u64 * std::mem::size_of::<shaders::Vertex>() as u64
+        );
         let shared_vertex_buffer: Subbuffer<[shaders::Vertex]> = Buffer::new_slice(
             context.memory_allocator.clone(),
             BufferCreateInfo {
@@ -93,7 +112,7 @@ impl Scene {
             AllocationCreateInfo {
                 ..Default::default()
             },
-            Self::SHARED_VERTEX_BUFFER_SIZE as u64 * std::mem::size_of::<shaders::Vertex>() as u64,
+            Self::SHARED_VERTEX_BUFFER_SIZE as u64,
         )
         .unwrap();
 
@@ -107,6 +126,11 @@ impl Scene {
         //     Material materials[];
         // };
 
+        log::info!(
+            "Shared material buffer size: {:?} bytes",
+            Self::SHARED_MATERIAL_BUFFER_SIZE as u64
+                * std::mem::size_of::<shaders::Material>() as u64
+        );
         let shared_material_buffer: Subbuffer<[shaders::Material]> = Buffer::new_slice(
             context.memory_allocator.clone(),
             BufferCreateInfo {
@@ -119,8 +143,7 @@ impl Scene {
             AllocationCreateInfo {
                 ..Default::default()
             },
-            Self::SHARED_MATERIAL_BUFFER_SIZE as u64
-                * std::mem::size_of::<shaders::Material>() as u64,
+            Self::SHARED_MATERIAL_BUFFER_SIZE as u64,
         )
         .unwrap();
 
@@ -134,6 +157,10 @@ impl Scene {
         //     uint indices[];
         // };
 
+        log::info!(
+            "Shared index buffer size: {:?} bytes",
+            Self::SHARED_INDEX_BUFFER_SIZE as u64 * std::mem::size_of::<u32>() as u64
+        );
         let shared_index_buffer: Subbuffer<[u32]> = Buffer::new_slice(
             context.memory_allocator.clone(),
             BufferCreateInfo {
@@ -146,7 +173,7 @@ impl Scene {
             AllocationCreateInfo {
                 ..Default::default()
             },
-            Self::SHARED_INDEX_BUFFER_SIZE as u64 * std::mem::size_of::<u32>() as u64,
+            Self::SHARED_INDEX_BUFFER_SIZE as u64,
         )
         .unwrap();
 
@@ -173,6 +200,8 @@ impl Scene {
             world,
             resources,
             rhit_descriptor_set,
+            geometries_map: HashMap::new(),
+
             shared_offsets_buffer,
             shared_vertex_buffer,
             vertex_offset: 0,
@@ -181,6 +210,18 @@ impl Scene {
             shared_index_buffer,
             index_offset: 0,
         }
+    }
+
+    pub fn add_geometry(
+        &mut self,
+        geometry_ident: String,
+        geometry: geometry::Geometry,
+    ) -> Option<geometry::Geometry> {
+        self.geometries_map.insert(geometry_ident, geometry)
+    }
+
+    pub fn get_geometry(&self, geometry_ident: &str) -> Option<&geometry::Geometry> {
+        self.geometries_map.get(geometry_ident)
     }
 
     /// Adds vertices to the shared vertex buffer and returns the start and end offset.
@@ -384,6 +425,11 @@ impl Scene {
         offsets: &[shaders::Offsets],
         context: &VulkanContext,
     ) {
+        if offsets.len() == 0 {
+            // TODO: Is it okay to just return?
+            return;
+        }
+
         // Create a host-visible staging buffer
         let staging_buffer = Buffer::from_iter(
             context.memory_allocator.clone(),

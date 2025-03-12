@@ -10,8 +10,11 @@ vec3 sky_color(vec3 direction) {
         return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
     }
     else {
-        return vec3(0.03f);
+        return vec3(0.1f);
     }
+
+    // Solid color
+    // return vec3(0.5f, 0.7f, 1.0f); // Light blue
 }
 
 
@@ -25,4 +28,6 @@ void main() {
     // Light sky color
     vec3 sky = sky_color(direction);
     payload.hit_value = sky;
+    // payload.attenuation = vec3(1.0, 1.0, 1.0);
+    payload.done = 1;
 }

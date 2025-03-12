@@ -30,8 +30,25 @@ layout(binding = 3, set = 2) readonly buffer index_buffer {
 
 layout(binding = 0, set = 3) uniform sampler2D textures[];
 
+// PCG (Permuted Congruential Generator) - better randomness than the basic sin hash
 float rand(vec2 co) {
-    return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    uint state = uint(co.x * 12345.0) + uint(co.y * 67890.0);
+    state = state * 747796405u + 2891336453u;
+    state = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    state = (state >> 22u) ^ state;
+    return float(state) / 4294967295.0;
+}
+
+// Hash function for generating random direction vectors
+vec3 random_unit_vector(vec2 seed, float depth) {
+    // Create different seeds for each component
+    float x = rand(seed + vec2(depth, 0.13));
+    float y = rand(seed + vec2(0.71, depth));
+    float z = rand(seed + vec2(depth * 0.39, depth * 0.57));
+    
+    // Map from [0,1] to [-1,1]
+    vec3 v = 2.0 * vec3(x, y, z) - 1.0;
+    return normalize(v);
 }
 
 void main() {
@@ -74,58 +91,35 @@ void main() {
         base_color = material.base_color.xyz;
     }
     
-        // Get incoming ray direction and world position
+    // Get incoming ray direction and world position
     vec3 ray_dir = gl_WorldRayDirectionEXT;
     vec3 world_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
     
     // Calculate reflection direction
     vec3 reflected = reflect(ray_dir, normal);
 
-    // // Add some roughness-based perturbation
-    // if (material.roughness > 0.0) {
-    //     // Simple roughness implementation - perturbs reflection based on roughness
-    //     float roughness_factor = material.roughness * material.roughness; // Square for physically-based response
-    //     vec3 random_dir = normalize(vec3(
-    //         rand(world_pos.xy + gl_PrimitiveID) * 2.0 - 1.0,
-    //         rand(world_pos.yz + gl_PrimitiveID) * 2.0 - 1.0,
-    //         rand(world_pos.zx + gl_PrimitiveID) * 2.0 - 1.0
-    //     ));
-    //     reflected = normalize(mix(reflected, random_dir, roughness_factor));
-    // }
+    vec3 random = random_unit_vector(payload.in_uv, float(payload.depth));
 
-    // // Ensure the reflected direction is on the correct hemisphere
-    // if (dot(reflected, normal) < 0.0) {
-    //     reflected = reflected - 2.0 * dot(reflected, normal) * normal;
-    // }
-    
+    // Apply random perturbation to the reflection direction
+    reflected += random / 2.0 * material.roughness;
+    reflected = normalize(reflected);
 
-    // Calculate Fresnel factor for metals and non-metals
-    // For metals (metallic=1.0): Fresnel reflects the base_color
-    // For non-metals (metallic=0.0): Fresnel uses standard dielectric F0=0.04
-    vec3 F0 = mix(vec3(0.04), base_color, material.metallic);
-    vec3 fresnel = F0 + (1.0 - F0) * pow(1.0 - max(dot(normalize(-ray_dir), normal), 0.0), 5.0);
-    
-    // Avoid self-intersection by offsetting the origin slightly
-    vec3 reflect_origin = world_pos + normal * 0.001;
+    // Make sure it's in the same hemisphere as the normal
+    if (dot(reflected, normal) < 0.0) {
+        reflected = -reflected;
+    }
+
+    vec3 reflect_origin = world_pos + normal * 0.001; // Offset to avoid self-intersection
 
     // Update payload for next bounce
     payload.origin = reflect_origin;
     payload.direction = reflected;
     payload.done = 0;
 
-    // Materials with higher metallic values reflect more of their base color
-    vec3 metallic_reflection = mix(vec3(1.0), base_color, material.metallic);
+
+    // Store diffuse contribution as the hit value
+    payload.hit_value = base_color;
     
-    // Update attenuation based on material properties
-    payload.attenuation *= metallic_reflection;
-    
-    // Direct lighting contribution
-    float diffuse_factor = max(dot(normal, -ray_dir), 0.0);
-    vec3 ambient = base_color * 0.02 + vec3(0.05); // Simple ambient term
-    
-    // Non-metallic surfaces have diffuse contribution, metallic surfaces don't
-    vec3 diffuse = mix(base_color * diffuse_factor, vec3(0.0), material.metallic);
-    
-    // Combine lighting for this bounce
-    payload.hit_value = (ambient + diffuse) * 15.0;
+    // Apply reflection contribution to attenuation for the next bounce
+    payload.attenuation *= 0.5;
 }

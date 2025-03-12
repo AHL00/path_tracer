@@ -41,9 +41,9 @@ use vulkano::{
 };
 
 use crate::{
-    graphics::VulkanContext,
+    graphics::{Texture, VulkanContext},
     material::Material,
-    scene::{Transform, geometry::Geometry},
+    scene::{geometry::Geometry, Transform},
 };
 
 pub mod shaders {
@@ -136,14 +136,18 @@ pub struct Renderer {
     /// the entire array must be updated at once.
     bindless_textures: Vec<(Arc<ImageView>, Arc<Sampler>)>,
     bindless_texture_index: u32,
+    // TODO: These should be weak pointers
+    // to avoid keeping them alive
+    // Also in geometry and material
+    pub loaded_textures_map: std::collections::HashMap<String, Texture>,
 
     pub uniform_buffer: Subbuffer<shaders::raygen::Camera>,
     pub scene: crate::scene::Scene,
 }
 
 impl Renderer {
-    const MAX_TEXTURE_COUNT: u32 = 1024; // Maximum number of textures
-    const RAY_RECURSION_DEPTH: u32 = 2; // Maximum number of ray recursion depth
+    const MAX_TEXTURE_COUNT: u32 = 5000; // Maximum number of textures
+    const RAY_RECURSION_DEPTH: u32 = 2; 
 
     pub fn new(context: &crate::graphics::VulkanContext) -> Self {
         let pipeline_layout = PipelineLayout::new(
@@ -349,12 +353,22 @@ impl Renderer {
         log::info!("Ray tracing pipeline created");
 
         let proj =
-            glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1280.0 / 720.0, 0.01, 100.0);
-        let view = glam::Mat4::look_at_rh(
+            glam::Mat4::perspective_rh(90.0_f32.to_radians(), 1280.0 / 720.0, 0.01, 10000.0);
+        let view = glam::Mat4::look_to_rh(
+            // glam::Vec3::new(-3.0, 2.0, -2.0),
+            glam::Vec3::new(5.0, 2.0, -1.0),
             glam::Vec3::new(1.0, 0.0, 0.0),
-            glam::Vec3::new(-2.0, 1.0, 0.0),
             glam::Vec3::new(0.0, -1.0, 0.0),
         );
+
+        // // Cornell
+        // let view = glam::Mat4::look_to_rh(
+        //     glam::Vec3::new(-278.0, 273.0 + 50.0, -800.0),
+        //     glam::Vec3::new(0.0, -0.1, 1.0),
+        //     glam::Vec3::new(0.0, -1.0, 0.0),
+        // );
+
+        log::info!("View inverse: {:#?}", view.inverse().to_cols_array_2d());
 
         let uniform_buffer = Buffer::from_data(
             context.memory_allocator.clone(),
@@ -481,6 +495,7 @@ impl Renderer {
             bindless_textures_descriptor_set,
             bindless_textures: vec![],
             bindless_texture_index: 0,
+            loaded_textures_map: std::collections::HashMap::new(),
 
             _blas: blas.clone(),
             tlas,
@@ -528,8 +543,21 @@ impl Renderer {
         self.rgen_descriptor_set = descriptor_set;
     }
 
+    pub fn lookup_texture(&self, image_ident: &str) -> Option<Texture> {
+        self.loaded_textures_map.get(image_ident).cloned()
+    }
+
+    pub fn add_texture_to_lookup_map(
+        &mut self,
+        image_ident: String,
+        texture: Texture,
+    ) {
+        self.loaded_textures_map.insert(image_ident, texture);
+    }
+
     /// Add a texture to the global pool, returning the index of the texture
     /// in the bindless texture descriptor set.
+    /// NOTE: Does not check whether the texture is already loaded or add it to the lookup map.
     pub fn add_texture(
         &mut self,
         image: Arc<ImageView>,
@@ -552,7 +580,7 @@ impl Renderer {
         self.bindless_texture_index += 1;
 
         if self.bindless_texture_index >= Self::MAX_TEXTURE_COUNT {
-            panic!("Bindless texture index out of bounds");
+            panic!("Bindless texture pool size exceeded");
         }
 
         index

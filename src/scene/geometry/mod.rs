@@ -21,8 +21,6 @@ use crate::renderer::{
     shaders::{self, Vertex},
 };
 
-use super::Transform;
-
 #[derive(Clone)]
 /// A component representing a geometry object in the scene
 pub struct Geometry {
@@ -38,7 +36,7 @@ pub struct Geometry {
 }
 
 #[derive(Clone)]
-struct DynamicGeometryData {
+pub struct DynamicGeometryData {
     index_buffer: Option<Subbuffer<[u32]>>,
 }
 
@@ -54,11 +52,20 @@ impl Geometry {
     /// Creates a new Geometry object with its own vertex and index buffers.
     /// Geometry is linked to a specific scene due to shared buffers.
     pub fn create(
+        geometry_ident: String,
         vertices: Vec<CustomVertex>,
         indices: Vec<u32>,
         scene: &mut crate::scene::Scene,
         context: &crate::graphics::VulkanContext,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Check if the geometry already exists
+        if scene.get_geometry(&geometry_ident).is_some() {
+            log::debug!("Geometry {} already exists, returning existing geometry", geometry_ident);
+            return Ok(scene.get_geometry(&geometry_ident).unwrap().clone());
+        }
+
+        // log::debug!("Creating geometry [{}] with {} vertices and {} indices", geometry_ident, vertices.len(), indices.len());
+
         // Upload vertex buffer
         let (vertices_start, vertices_end) = scene.add_vertices(
             &vertices
@@ -78,7 +85,7 @@ impl Geometry {
         // Build BLAS for this geometry
         let blas = unsafe { build_blas_from_mesh(vertices_buffer, Some(index_buffer), context) };
 
-        Ok(Self {
+        let geometry = Self {
             blas,
             vertex_count: vertices.len() as u32,
             index_count: indices.len() as u32,
@@ -87,7 +94,12 @@ impl Geometry {
             _shared_index_buffer_offset: index_start,
             _shared_index_buffer_count: index_end - index_start,
             dynamic: None,
-        })
+        };
+
+        // Add the geometry to the scene
+        scene.add_geometry(geometry_ident, geometry.clone());
+        
+        Ok(geometry)
     }
 
     /// Returns (vertex_offset, vertex_count)
@@ -104,6 +116,20 @@ impl Geometry {
             self._shared_index_buffer_offset,
             self._shared_index_buffer_count,
         )
+    }
+
+    pub fn find_model_vertex_bounds(
+        vertices: &[CustomVertex]
+    ) -> (glam::Vec3, glam::Vec3) {
+        let mut min = glam::Vec3::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut max = glam::Vec3::new(f32::MIN, f32::MIN, f32::MIN);
+
+        for vertex in vertices {
+            min = glam::Vec3::min(min, vertex.position);
+            max = glam::Vec3::max(max, vertex.position);
+        }
+
+        (min, max)
     }
 }
 

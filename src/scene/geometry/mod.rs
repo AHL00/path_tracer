@@ -65,7 +65,7 @@ impl Geometry {
         }
 
         // log::debug!("Creating geometry [{}] with {} vertices and {} indices", geometry_ident, vertices.len(), indices.len());
-
+        // log::info!("Vertices: {:#?}", vertices);
         // Upload vertex buffer
         let (vertices_start, vertices_end) = scene.add_vertices(
             &vertices

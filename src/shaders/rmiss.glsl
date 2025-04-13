@@ -6,11 +6,11 @@
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 
 vec3 sky_color(vec3 direction) {
-    if (direction.y > 0.0f) {
+    if (direction.y > 0.3f) {
         return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
     }
     else {
-        return vec3(0.1f);
+        return vec3(0.03f);
     }
 
     // Solid color

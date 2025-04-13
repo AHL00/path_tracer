@@ -1,11 +1,7 @@
 use std::time::{Duration, Instant};
 
 use egui_winit_vulkano::egui::{self};
-use path_tracer::{
-    graphics::VulkanContext,
-    renderer::Renderer,
-    scene::Scene,
-};
+use path_tracer::{graphics::VulkanContext, renderer::Renderer, scene::Scene};
 use simple_logger::SimpleLogger;
 use vulkano::{
     Validated, VulkanError,
@@ -104,6 +100,7 @@ impl App {
             egui::Window::new("Settings")
                 .resizable(true)
                 .default_width(300.0)
+                .title_bar(false)
                 .show(&ctx, |ui| {
                     ui.label(format!(
                         "FPS: {:.2}",
@@ -170,19 +167,22 @@ impl ApplicationHandler for App {
         // )
         // .unwrap();
 
+        // Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/bistro/bistro.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        // )
+        // .unwrap();
+
         Scene::import_gltf(
             &mut renderer,
-            std::path::Path::new("./assets/bistro/bistro.gltf"),
+            std::path::Path::new("./assets/cornell/cornell.gltf"),
             &self.context.as_ref().unwrap(),
         )
         .unwrap();
 
-        // Scene::import_gltf(
-        //     &mut renderer,
-        //     std::path::Path::new("./assets/cornell/cornell_box.gltf"),
-        //     &self.context.as_ref().unwrap(),
-        // )
-        // .unwrap();
+        renderer.camera.transform.position = [0.0, 1.0, 2.2].into();
+        
 
         log::info!("GLTF scene loaded");
 

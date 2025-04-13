@@ -519,4 +519,16 @@ impl Transform {
         }
         self.matrix
     }
+
+    pub fn forward(&self) -> glam::Vec3 {
+        self.rotation * glam::Vec3::Z
+    }
+
+    pub fn right(&self) -> glam::Vec3 {
+        self.rotation * glam::Vec3::X
+    }
+
+    pub fn up(&self) -> glam::Vec3 {
+        self.rotation * glam::Vec3::Y
+    }
 }

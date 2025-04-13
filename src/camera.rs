@@ -1,0 +1,22 @@
+use crate::scene::Transform;
+
+
+
+pub struct Camera {
+    pub transform: Transform,
+    /// Field of view in radians
+    pub fov_y: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            transform: Transform::default(),
+            fov_y: 80.0_f32.to_radians(),
+            near: 0.1,
+            far: 1000.0,
+        }
+    }
+}

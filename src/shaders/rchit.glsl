@@ -8,8 +8,6 @@ layout(location = 0) rayPayloadInEXT RayPayload payload;
 layout(location = 1) rayPayloadEXT bool is_shadowed;
 hitAttributeEXT vec2 attribs;
 
-const int MAX_BOUNCES = 5; 
-
 layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level_as;
 
 layout(binding = 0, set = 2) readonly buffer offsets_buffer {
@@ -29,27 +27,6 @@ layout(binding = 3, set = 2) readonly buffer index_buffer {
 };
 
 layout(binding = 0, set = 3) uniform sampler2D textures[];
-
-// PCG (Permuted Congruential Generator) - better randomness than the basic sin hash
-float rand(vec2 co) {
-    uint state = uint(co.x * 12345.0) + uint(co.y * 67890.0);
-    state = state * 747796405u + 2891336453u;
-    state = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    state = (state >> 22u) ^ state;
-    return float(state) / 4294967295.0;
-}
-
-// Hash function for generating random direction vectors
-vec3 random_unit_vector(vec2 seed, float depth) {
-    // Create different seeds for each component
-    float x = rand(seed + vec2(depth, 0.13));
-    float y = rand(seed + vec2(0.71, depth));
-    float z = rand(seed + vec2(depth * 0.39, depth * 0.57));
-    
-    // Map from [0,1] to [-1,1]
-    vec3 v = 2.0 * vec3(x, y, z) - 1.0;
-    return normalize(v);
-}
 
 void main() {
     Offsets offsets = offsets_array[gl_InstanceCustomIndexEXT];
@@ -95,31 +72,78 @@ void main() {
     vec3 ray_dir = gl_WorldRayDirectionEXT;
     vec3 world_pos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
     
-    // Calculate reflection direction
-    vec3 reflected = reflect(ray_dir, normal);
+    // // Calculate reflection direction
+    // vec3 reflected = reflect(ray_dir, normal);
 
-    vec3 random = random_unit_vector(payload.in_uv, float(payload.depth));
+    // vec3 random = random_unit_vector(payload.in_uv, float(payload.depth));
 
-    // Apply random perturbation to the reflection direction
-    reflected += random / 2.0 * material.roughness;
-    reflected = normalize(reflected);
+    // // Apply random perturbation to the reflection direction
+    // reflected += random / 2.0;
+    // reflected = normalize(reflected);
 
-    // Make sure it's in the same hemisphere as the normal
-    if (dot(reflected, normal) < 0.0) {
-        reflected = -reflected;
-    }
+    // // Make sure it's in the same hemisphere as the normal
+    // if (dot(reflected, normal) < 0.0) {
+    //     reflected = -reflected;
+    // }
 
-    vec3 reflect_origin = world_pos + normal * 0.001; // Offset to avoid self-intersection
+    // vec3 reflect_origin = world_pos + normal * 0.001; // Offset to avoid self-intersection
 
     // Update payload for next bounce
-    payload.origin = reflect_origin;
-    payload.direction = reflected;
-    payload.done = 0;
+    // payload.origin = reflect_origin;
+    // payload.direction = reflected;
+    // payload.done = 0;
 
 
     // Store diffuse contribution as the hit value
-    payload.hit_value = base_color;
+    // payload.hit_value = base_color;
     
     // Apply reflection contribution to attenuation for the next bounce
-    payload.attenuation *= 0.5;
+    // payload.attenuation *= 0.33;
+
+    float roughness = material.roughness;
+    float metallic = material.metallic;
+
+    // Generate random values
+    vec2 random_values = random_float2(payload.in_uv, float(payload.depth));
+
+    vec3 scatter_direction;
+    vec3 attenuation;
+
+    // Specular reflection with roughness
+    if (rand(payload.in_uv + vec2(0.0, float(payload.depth) * 0.17)) < metallic) {
+        // Specular/metallic path
+        vec3 reflected = reflect(ray_dir, normal);
+        
+        // Add roughness-controlled perturbation
+        vec3 random_perturbation = random_unit_vector(payload.in_uv, float(payload.depth));
+        scatter_direction = normalize(mix(reflected, random_perturbation, roughness * roughness));
+        
+        // Make sure we're in the right hemisphere
+        if (dot(scatter_direction, normal) <= 0.0) {
+            scatter_direction = reflected;
+        }
+        
+        // Metallic surfaces tint the reflection with their color
+        attenuation = base_color;
+    } else {
+        // Diffuse path - use cosine weighted sampling
+        scatter_direction = cosine_hemisphere_sample(random_values, normal);
+        
+        // Diffuse surfaces lose energy based on their color
+        attenuation = base_color * (1.0 - metallic);
+    }
+
+    // Add small offset to avoid self-intersection
+    vec3 scatter_origin = world_pos + normal * 0.001;
+
+    // Update payload for next bounce
+    payload.origin = scatter_origin;
+    payload.direction = scatter_direction;
+    payload.done = 0;
+
+    // Set the contribution for this bounce
+    payload.hit_value = vec3(0.0);  // Direct lighting would go here
+
+    // Update attenuation for the next bounce
+    payload.attenuation *= attenuation;
 }

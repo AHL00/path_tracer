@@ -30,7 +30,7 @@ use vulkano::{
     pipeline::{
         PipelineBindPoint, PipelineCreateFlags, PipelineLayout, PipelineShaderStageCreateInfo,
         graphics::vertex_input::Vertex,
-        layout::PipelineLayoutCreateInfo,
+        layout::{PipelineLayoutCreateInfo, PushConstantRange},
         ray_tracing::{
             RayTracingPipeline, RayTracingPipelineCreateInfo, RayTracingShaderGroupCreateInfo,
             ShaderBindingTable,
@@ -41,9 +41,10 @@ use vulkano::{
 };
 
 use crate::{
+    camera::Camera,
     graphics::{Texture, VulkanContext},
     material::Material,
-    scene::{geometry::Geometry, Transform},
+    scene::{Transform, geometry::Geometry},
 };
 
 pub mod shaders {
@@ -125,7 +126,6 @@ pub struct Renderer {
 
     // Just a base blas for the tlas
     // Idk how to make a tlas without a blas for now
-    _blas: Arc<AccelerationStructure>,
     pub tlas: Arc<AccelerationStructure>,
 
     // Bindless textures descriptor set
@@ -141,15 +141,25 @@ pub struct Renderer {
     // Also in geometry and material
     pub loaded_textures_map: std::collections::HashMap<String, Texture>,
 
-    pub uniform_buffer: Subbuffer<shaders::raygen::Camera>,
     pub scene: crate::scene::Scene,
+
+    pub camera: crate::camera::Camera,
+    pub samples_per_pixel: u32,
 }
 
 impl Renderer {
     const MAX_TEXTURE_COUNT: u32 = 5000; // Maximum number of textures
-    const RAY_RECURSION_DEPTH: u32 = 2; 
+    const RAY_RECURSION_DEPTH: u32 = 2;
 
     pub fn new(context: &crate::graphics::VulkanContext) -> Self {
+        let push_constant_requirements = shaders::raygen::load(context.device.clone())
+            .unwrap()
+            .entry_point("main")
+            .unwrap()
+            .info()
+            .push_constant_requirements
+            .expect("Failed to get push constant requirements");
+
         let pipeline_layout = PipelineLayout::new(
             context.device.clone(),
             PipelineLayoutCreateInfo {
@@ -170,15 +180,24 @@ impl Renderer {
                                         )
                                     },
                                 ),
-                                (
-                                    1,
-                                    DescriptorSetLayoutBinding {
-                                        stages: ShaderStages::RAYGEN,
-                                        ..DescriptorSetLayoutBinding::descriptor_type(
-                                            DescriptorType::UniformBuffer,
-                                        )
-                                    },
-                                ),
+                                // (
+                                //     1,
+                                //     DescriptorSetLayoutBinding {
+                                //         stages: ShaderStages::RAYGEN,
+                                //         ..DescriptorSetLayoutBinding::descriptor_type(
+                                //             DescriptorType::UniformBuffer,
+                                //         )
+                                //     },
+                                // ),
+                                // (
+                                //     2,
+                                //     DescriptorSetLayoutBinding {
+                                //         stages: ShaderStages::RAYGEN,
+                                //         ..DescriptorSetLayoutBinding::descriptor_type(
+                                //             DescriptorType::UniformBuffer,
+                                //         )
+                                //     },
+                                // ),
                             ]
                             .into_iter()
                             .collect(),
@@ -298,6 +317,7 @@ impl Renderer {
                     )
                     .unwrap(),
                 ],
+                push_constant_ranges: vec![push_constant_requirements],
                 ..Default::default()
             },
         )
@@ -352,102 +372,23 @@ impl Renderer {
 
         log::info!("Ray tracing pipeline created");
 
-        let proj =
-            glam::Mat4::perspective_rh(90.0_f32.to_radians(), 1280.0 / 720.0, 0.01, 10000.0);
-        let view = glam::Mat4::look_to_rh(
-            // glam::Vec3::new(-3.0, 2.0, -2.0),
-            glam::Vec3::new(5.0, 2.0, -1.0),
-            glam::Vec3::new(1.0, 0.0, 0.0),
-            glam::Vec3::new(0.0, -1.0, 0.0),
-        );
-
-        // // Cornell
+        // For reference
+        // let proj = glam::Mat4::perspective_rh(90.0_f32.to_radians(), 1280.0 / 720.0, 0.01, 10000.0);
         // let view = glam::Mat4::look_to_rh(
-        //     glam::Vec3::new(-278.0, 273.0 + 50.0, -800.0),
-        //     glam::Vec3::new(0.0, -0.1, 1.0),
+        //     // glam::Vec3::new(-3.0, 2.0, -2.0),
+        //     glam::Vec3::new(-0.0, 1.0, 2.2),
+        //     glam::Vec3::new(0.0, 0.0, -1.0),
         //     glam::Vec3::new(0.0, -1.0, 0.0),
         // );
 
-        log::info!("View inverse: {:#?}", view.inverse().to_cols_array_2d());
-
-        let uniform_buffer = Buffer::from_data(
-            context.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::UNIFORM_BUFFER,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            shaders::raygen::Camera {
-                view_proj: (proj * view).to_cols_array_2d(),
-                view_inverse: view.inverse().to_cols_array_2d(),
-                proj_inverse: proj.inverse().to_cols_array_2d(),
-            },
-        )
-        .unwrap();
-
-        log::info!("Uniform buffer created");
-
-        let vertices = [
-            CustomVertex {
-                position: [-0.0, -0.0, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [0.5, 1.0].into(),
-            },
-            CustomVertex {
-                position: [0.0, 0.0, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [0.5, 1.0].into(),
-            },
-            CustomVertex {
-                position: [0.0, -0.0, 0.0].into(),
-                normal: [0.0, 0.0, 1.0].into(),
-                tex_coords: [0.5, 1.0].into(),
-            },
-        ];
-
-        let vertex_buffer = Buffer::from_iter(
-            context.memory_allocator.clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::VERTEX_BUFFER
-                    | BufferUsage::SHADER_DEVICE_ADDRESS
-                    | BufferUsage::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            vertices,
-        )
-        .unwrap();
-
-        let blas =
-            unsafe { build_acceleration_structure_triangles(vertex_buffer.clone(), context) };
-
-        let tlas = unsafe {
-            build_top_level_acceleration_structure(
-                vec![AccelerationStructureInstance {
-                    acceleration_structure_reference: blas.device_address().into(),
-                    ..Default::default()
-                }],
-                context,
-            )
-        };
+        let tlas = unsafe { build_top_level_acceleration_structure(vec![], context) };
 
         log::info!("Top-level acceleration structure created");
 
         let rgen_descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             pipeline_layout.set_layouts()[0].clone(),
-            [
-                WriteDescriptorSet::acceleration_structure(0, tlas.clone()),
-                WriteDescriptorSet::buffer(1, uniform_buffer.clone()),
-            ],
+            [WriteDescriptorSet::acceleration_structure(0, tlas.clone())],
             [],
         )
         .unwrap();
@@ -497,10 +438,11 @@ impl Renderer {
             bindless_texture_index: 0,
             loaded_textures_map: std::collections::HashMap::new(),
 
-            _blas: blas.clone(),
             tlas,
-            uniform_buffer,
             scene,
+
+            samples_per_pixel: 1,
+            camera: Camera::default(),
         }
     }
 
@@ -532,10 +474,10 @@ impl Renderer {
         let descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             self.pipeline_layout.set_layouts()[0].clone(),
-            [
-                WriteDescriptorSet::acceleration_structure(0, self.tlas.clone()),
-                WriteDescriptorSet::buffer(1, self.uniform_buffer.clone()),
-            ],
+            [WriteDescriptorSet::acceleration_structure(
+                0,
+                self.tlas.clone(),
+            )],
             [],
         )
         .unwrap();
@@ -547,11 +489,7 @@ impl Renderer {
         self.loaded_textures_map.get(image_ident).cloned()
     }
 
-    pub fn add_texture_to_lookup_map(
-        &mut self,
-        image_ident: String,
-        texture: Texture,
-    ) {
+    pub fn add_texture_to_lookup_map(&mut self, image_ident: String, texture: Texture) {
         self.loaded_textures_map.insert(image_ident, texture);
     }
 
@@ -640,6 +578,75 @@ impl Renderer {
             .update_shared_offsets_buffer(&offsets_vec, context);
 
         self.tlas = unsafe { build_top_level_acceleration_structure(blas_instances, context) };
+
+        #[repr(C)]
+        #[derive(BufferContents, Clone, Copy)]
+        struct CombinedPushConstants {
+            uniforms: shaders::raygen::RendererUniforms,
+            camera: shaders::raygen::Camera,
+        }
+
+        // TODO: Store this in struct
+        let push_constant_requirements = shaders::raygen::load(context.device.clone())
+            .unwrap()
+            .entry_point("main")
+            .unwrap()
+            .info()
+            .push_constant_requirements
+            .expect("Failed to get push constant requirements");
+
+        assert_eq!(
+            std::mem::size_of::<CombinedPushConstants>(),
+            push_constant_requirements.size as usize
+        );
+
+        // let proj = glam::Mat4::perspective_rh(90.0_f32.to_radians(), 1280.0 / 720.0, 0.01, 10000.0);
+        // let view = glam::Mat4::look_to_rh(
+        //     // glam::Vec3::new(-3.0, 2.0, -2.0),
+        //     glam::Vec3::new(-0.0, 1.0, 2.2),
+        //     glam::Vec3::new(0.0, 0.0, -1.0),
+        //     glam::Vec3::new(0.0, -1.0, 0.0),
+        // );
+        let proj = glam::Mat4::perspective_rh(
+            self.camera.fov_y,
+            context.swapchain.image_extent()[0] as f32 / context.swapchain.image_extent()[1] as f32,
+            self.camera.near,
+            self.camera.far,
+        );
+        let view = glam::Mat4::look_to_rh(
+            // glam::Vec3::new(-3.0, 2.0, -2.0),
+            // glam::Vec3::new(5.0, 2.0, -1.0),
+            self.camera.transform.position,
+            -self.camera.transform.forward(),
+            -self.camera.transform.up(),
+        );
+        // println!(
+        //     "Eye: {:#?}\nDir: {:#?}\nUp: {:#?}",
+        //     self.camera.transform.position,
+        //     self.camera.transform.forward(),
+        //     self.camera.transform.up()
+        // );
+
+        let push_constants = CombinedPushConstants {
+            uniforms: shaders::raygen::RendererUniforms {
+                samples_per_pixel: self.samples_per_pixel,
+                seed: rand::random(),
+                padding: [0; 2],
+            },
+            camera: shaders::raygen::Camera {
+                view_proj: (proj * view).to_cols_array_2d(),
+                view_inverse: view.inverse().to_cols_array_2d(),
+                proj_inverse: proj.inverse().to_cols_array_2d(),
+            },
+        };
+
+        builder
+            .push_constants(
+                self.pipeline_layout.clone(),
+                0, // Offset 0 for the entire block
+                push_constants,
+            )
+            .unwrap();
 
         // Update the descriptor set with the new TLAS
         self.update_descriptor_set(context);

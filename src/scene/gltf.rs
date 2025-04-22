@@ -10,11 +10,12 @@ use super::{Transform, geometry::Geometry};
 
 impl super::Scene {
     /// Imports a GLTF file and adds it to the scene.
-    /// https://user-images.githubusercontent.com/7414478/43995082-c2e1559a-9d75-11e8-93de-9e9f6949a4ae.PNG
+    // https://user-images.githubusercontent.com/7414478/43995082-c2e1559a-9d75-11e8-93de-9e9f6949a4ae.PNG
     pub fn import_gltf(
         renderer: &mut Renderer,
         path: &std::path::Path,
         context: &VulkanContext,
+        position_offset: glam::Vec3,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (document, buffers, images) = gltf::import(path)?;
 
@@ -35,7 +36,7 @@ impl super::Scene {
 
                     let (position, rotation, scale) = node.transform().decomposed();
 
-                    transform.position = glam::Vec3::from(position);
+                    transform.position = glam::Vec3::from(position) + position_offset;
                     transform.rotation = glam::Quat::from_array(rotation);
                     transform.scale = glam::Vec3::from(scale);
 

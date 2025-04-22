@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, u32};
 
 use rand::Rng;
 use vulkano::{
@@ -116,6 +116,11 @@ pub struct CustomVertex {
     pub tex_coords: glam::Vec2,
 }
 
+pub struct PushConstantRequirements {
+    closest_hit: PushConstantRange,
+    raygen: PushConstantRange,
+}
+
 pub struct Renderer {
     pub rgen_descriptor_set: Arc<DescriptorSet>,
 
@@ -123,6 +128,7 @@ pub struct Renderer {
     pub pipeline_layout: Arc<PipelineLayout>,
     pub pipeline: Arc<RayTracingPipeline>,
     pub shader_binding_table: ShaderBindingTable,
+    pub push_constant_requirements: PushConstantRequirements,
 
     // Just a base blas for the tlas
     // Idk how to make a tlas without a blas for now
@@ -145,6 +151,11 @@ pub struct Renderer {
 
     pub camera: crate::camera::Camera,
     pub samples_per_pixel: u32,
+
+    pub prev_cam_state: crate::camera::Camera,
+    pub resized_dirty: bool,
+    pub accumulated_count: u32,
+    pub accumulation_limit: u32,
 }
 
 impl Renderer {
@@ -152,13 +163,22 @@ impl Renderer {
     const RAY_RECURSION_DEPTH: u32 = 2;
 
     pub fn new(context: &crate::graphics::VulkanContext) -> Self {
-        let push_constant_requirements = shaders::raygen::load(context.device.clone())
-            .unwrap()
-            .entry_point("main")
-            .unwrap()
-            .info()
-            .push_constant_requirements
-            .expect("Failed to get push constant requirements");
+        let push_constant_requirements = PushConstantRequirements {
+            closest_hit: shaders::closest_hit::load(context.device.clone())
+                .unwrap()
+                .entry_point("main")
+                .unwrap()
+                .info()
+                .push_constant_requirements
+                .expect("Failed to get push constant requirements"),
+            raygen: shaders::raygen::load(context.device.clone())
+                .unwrap()
+                .entry_point("main")
+                .unwrap()
+                .info()
+                .push_constant_requirements
+                .expect("Failed to get push constant requirements"),
+        };
 
         let pipeline_layout = PipelineLayout::new(
             context.device.clone(),
@@ -317,7 +337,10 @@ impl Renderer {
                     )
                     .unwrap(),
                 ],
-                push_constant_ranges: vec![push_constant_requirements],
+                push_constant_ranges: vec![
+                    push_constant_requirements.closest_hit,
+                    push_constant_requirements.raygen,
+                ],
                 ..Default::default()
             },
         )
@@ -431,6 +454,8 @@ impl Renderer {
             pipeline_layout,
             pipeline,
             rgen_descriptor_set,
+            push_constant_requirements,
+
             swapchain_image_sets,
             shader_binding_table,
             bindless_textures_descriptor_set,
@@ -443,6 +468,11 @@ impl Renderer {
 
             samples_per_pixel: 1,
             camera: Camera::default(),
+
+            prev_cam_state: Camera::default(),
+            resized_dirty: false,
+            accumulated_count: 0,
+            accumulation_limit: u32::MAX,
         }
     }
 
@@ -467,6 +497,8 @@ impl Renderer {
                 (image_view, descriptor_set)
             })
             .collect();
+
+        self.resized_dirty = true;
     }
 
     /// Update the descriptor set with self.tlas and self.uniform_buffer
@@ -536,7 +568,7 @@ impl Renderer {
         let mut query = <(&mut Geometry, &mut Transform, &Material)>::query();
         let mut offsets_vec = vec![];
         // TODO: If the number of meshes doesn't change, we can just update the TLAS
-        for (geometry, transform, material) in query.iter_mut(&mut self.scene.world) {
+        for (geometry, transform, material) in query.iter_mut(self.scene.world_mut_dont_mark_dirty()) {
             let show_percentage = 100.0;
             let rng = rand::rng().random_range(0.0..100.0);
             if rng > show_percentage {
@@ -579,27 +611,6 @@ impl Renderer {
 
         self.tlas = unsafe { build_top_level_acceleration_structure(blas_instances, context) };
 
-        #[repr(C)]
-        #[derive(BufferContents, Clone, Copy)]
-        struct CombinedPushConstants {
-            uniforms: shaders::raygen::RendererUniforms,
-            camera: shaders::raygen::Camera,
-        }
-
-        // TODO: Store this in struct
-        let push_constant_requirements = shaders::raygen::load(context.device.clone())
-            .unwrap()
-            .entry_point("main")
-            .unwrap()
-            .info()
-            .push_constant_requirements
-            .expect("Failed to get push constant requirements");
-
-        assert_eq!(
-            std::mem::size_of::<CombinedPushConstants>(),
-            push_constant_requirements.size as usize
-        );
-
         // let proj = glam::Mat4::perspective_rh(90.0_f32.to_radians(), 1280.0 / 720.0, 0.01, 10000.0);
         // let view = glam::Mat4::look_to_rh(
         //     // glam::Vec3::new(-3.0, 2.0, -2.0),
@@ -614,11 +625,9 @@ impl Renderer {
             self.camera.far,
         );
         let view = glam::Mat4::look_to_rh(
-            // glam::Vec3::new(-3.0, 2.0, -2.0),
-            // glam::Vec3::new(5.0, 2.0, -1.0),
             self.camera.transform.position,
-            -self.camera.transform.forward(),
-            -self.camera.transform.up(),
+            self.camera.transform.forward(),
+            self.camera.transform.up(),
         );
         // println!(
         //     "Eye: {:#?}\nDir: {:#?}\nUp: {:#?}",
@@ -627,11 +636,26 @@ impl Renderer {
         //     self.camera.transform.up()
         // );
 
-        let push_constants = CombinedPushConstants {
+        let state_dirty = {
+            let cam_dirty = self.camera != self.prev_cam_state;
+            let resized_dirty = self.resized_dirty;
+
+            self.resized_dirty = false;
+            self.prev_cam_state = self.camera.clone();
+
+            cam_dirty || self.scene.check_dirty_and_reset() || resized_dirty
+        };
+
+        if state_dirty {
+            self.accumulated_count = 0;
+        }
+
+        let raygen_push_constants = shaders::raygen::PushConstants {
             uniforms: shaders::raygen::RendererUniforms {
                 samples_per_pixel: self.samples_per_pixel,
                 seed: rand::random(),
-                padding: [0; 2],
+                accumulated_count: self.accumulated_count,
+                padding: [0; 1],
             },
             camera: shaders::raygen::Camera {
                 view_proj: (proj * view).to_cols_array_2d(),
@@ -640,12 +664,29 @@ impl Renderer {
             },
         };
 
+        let closest_hit_push_constants = shaders::closest_hit::RchitPushConstants {
+            uniforms: shaders::closest_hit::RendererUniforms {
+                samples_per_pixel: self.samples_per_pixel,
+                seed: rand::random(),
+                accumulated_count: self.accumulated_count,
+                padding: [0; 1],
+            },
+        };
+
+        if !state_dirty && self.accumulated_count < self.accumulation_limit {
+            self.accumulated_count += 1;
+        }
+
         builder
             .push_constants(
                 self.pipeline_layout.clone(),
                 0, // Offset 0 for the entire block
-                push_constants,
+                raygen_push_constants,
             )
+            .unwrap();
+
+        builder
+            .push_constants(self.pipeline_layout.clone(), 0, closest_hit_push_constants)
             .unwrap();
 
         // Update the descriptor set with the new TLAS

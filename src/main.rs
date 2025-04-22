@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use egui_winit_vulkano::egui::{self};
+use glam::Vec3;
 use path_tracer::{graphics::VulkanContext, renderer::Renderer, scene::Scene};
 use simple_logger::SimpleLogger;
 use vulkano::{
@@ -114,7 +115,7 @@ impl App {
 
                     ui.label(format!(
                         "Entities: {}",
-                        self.renderer.as_ref().unwrap().scene.world.len()
+                        self.renderer.as_ref().unwrap().scene.world().len()
                     ));
 
                     ui.label(format!(
@@ -125,6 +126,21 @@ impl App {
                     ui.label(format!(
                         "Textures: {}",
                         self.renderer.as_ref().unwrap().loaded_textures_map.len()
+                    ));
+
+                    ui.label(format!(
+                        "Materials: {}",
+                        self.renderer.as_ref().unwrap().scene.material_offset
+                    ));
+
+                    ui.label(format!(
+                        "Camera Position: {:?}",
+                        self.renderer.as_ref().unwrap().camera.transform.position
+                    ));
+
+                    ui.label(format!(
+                        "Accumulation Count: {}",
+                        self.renderer.as_ref().unwrap().accumulated_count
                     ));
                 });
         });
@@ -174,15 +190,38 @@ impl ApplicationHandler for App {
         // )
         // .unwrap();
 
+        // Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/cornell/cornell.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        // )
+        // .unwrap();
+
         Scene::import_gltf(
             &mut renderer,
-            std::path::Path::new("./assets/cornell/cornell.gltf"),
+            std::path::Path::new("./assets/lion_head_2k/lion_head_2k.gltf"),
             &self.context.as_ref().unwrap(),
+            Vec3::new(2.0, 0.0, 0.0),
         )
         .unwrap();
 
-        renderer.camera.transform.position = [0.0, 1.0, 2.2].into();
-        
+        Scene::import_gltf(
+            &mut renderer,
+            std::path::Path::new("./assets/boulder_01_2k/boulder_01_2k.gltf"),
+            &self.context.as_ref().unwrap(),
+            Vec3::new(-2.0, 0.0, 0.0),
+        )
+        .unwrap();
+
+        Scene::import_gltf(
+            &mut renderer,
+            std::path::Path::new("./assets/spheres/spheres.gltf"),
+            &self.context.as_ref().unwrap(),
+            Vec3::ZERO,
+        )
+        .unwrap();
+
+        renderer.camera.transform.position = [-1.5, 1.0, 5.0].into();
 
         log::info!("GLTF scene loaded");
 
@@ -332,9 +371,52 @@ impl ApplicationHandler for App {
                         KeyCode::Escape => {
                             event_loop.exit();
                         }
+                        KeyCode::KeyW => {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.position +=
+                                    0.1 * renderer.camera.transform.forward();
+                            }
+                        }
+                        KeyCode::KeyS => {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.position -=
+                                    0.1 * renderer.camera.transform.forward();
+                            }
+                        }
+                        KeyCode::KeyA => {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.position -=
+                                    0.1 * renderer.camera.transform.right();
+                            }
+                        }
+                        KeyCode::KeyD => {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.position +=
+                                    0.1 * renderer.camera.transform.right();
+                            }
+                        }
                         KeyCode::Space => {
-                            if let Some(context) = &mut self.context {
-                                context.winit.request_redraw();
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.position +=
+                                    0.1 * renderer.camera.transform.up();
+                            }
+                        }
+                        KeyCode::KeyC => {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.position -=
+                                    0.1 * renderer.camera.transform.up();
+                            }
+                        }
+                        KeyCode::ArrowLeft => {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.rotation *=
+                                    glam::Quat::from_rotation_y(0.1);
+                            }
+                        }
+                        KeyCode::ArrowRight => {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.camera.transform.rotation *=
+                                    glam::Quat::from_rotation_y(-0.1);
                             }
                         }
                         _ => {}

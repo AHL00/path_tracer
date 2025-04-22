@@ -20,8 +20,8 @@ pub mod geometry;
 pub mod gltf;
 
 pub struct Scene {
-    pub world: legion::World,
-    pub resources: legion::Resources,
+    world: legion::World,
+    resources: legion::Resources,
 
     pub rhit_descriptor_set: Arc<DescriptorSet>,
 
@@ -38,6 +38,8 @@ pub struct Scene {
     pub index_offset: u64,
 
     pub geometries_map: HashMap<String, geometry::Geometry>,
+
+    _is_dirty_for_renderer: bool,
 }
 
 impl Scene {
@@ -209,7 +211,45 @@ impl Scene {
             material_offset: 0,
             shared_index_buffer,
             index_offset: 0,
+            _is_dirty_for_renderer: true,
         }
+    }
+
+    pub fn check_dirty_and_reset(&mut self) -> bool {
+        if self._is_dirty_for_renderer {
+            self._is_dirty_for_renderer = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn world(&self) -> &legion::World {
+        &self.world
+    }
+
+    pub fn world_mut(&mut self) -> &mut legion::World {
+        self._is_dirty_for_renderer = true;
+
+        &mut self.world
+    }
+
+    pub fn world_mut_dont_mark_dirty(&mut self) -> &mut legion::World {
+        &mut self.world
+    }
+
+    pub fn resources(&self) -> &legion::Resources {
+        &self.resources
+    }
+
+    pub fn resources_mut(&mut self) -> &mut legion::Resources {
+        self._is_dirty_for_renderer = true;
+
+        &mut self.resources
+    }
+
+    pub fn resources_mut_dont_mark_dirty(&mut self) -> &mut legion::Resources {
+        &mut self.resources
     }
 
     pub fn add_geometry(
@@ -232,6 +272,8 @@ impl Scene {
         vertices: &[shaders::Vertex],
         context: &VulkanContext,
     ) -> (u64, u64) {
+        self._is_dirty_for_renderer = true;
+
         let start_offset = self.vertex_offset;
         let end_offset = start_offset + vertices.len() as u64;
 
@@ -296,6 +338,8 @@ impl Scene {
     /// Adds a material to the shared material buffer and returns the offset in the buffer.
     /// NOTE: MAKE SURE A FRAME IS NOT IN FLIGHT.
     pub fn add_material(&mut self, materials: &shaders::Material, context: &VulkanContext) -> u64 {
+        self._is_dirty_for_renderer = true;
+
         let start_offset = self.material_offset;
         let end_offset = start_offset + 1;
 
@@ -359,6 +403,8 @@ impl Scene {
 
     /// Returns (start, end) offsets in the shared index buffer.
     pub fn add_indices(&mut self, indices: &[u32], context: &VulkanContext) -> (u64, u64) {
+        self._is_dirty_for_renderer = true;
+
         let start_offset = self.index_offset;
         let end_offset = start_offset + indices.len() as u64;
 
@@ -521,7 +567,7 @@ impl Transform {
     }
 
     pub fn forward(&self) -> glam::Vec3 {
-        self.rotation * glam::Vec3::Z
+        self.rotation * glam::Vec3::NEG_Z
     }
 
     pub fn right(&self) -> glam::Vec3 {

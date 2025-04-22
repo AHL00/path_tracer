@@ -6,15 +6,12 @@
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 
 vec3 sky_color(vec3 direction) {
-    if (direction.y > 0.3f) {
-        return mix(vec3(1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
+    if (direction.y > 0.0f) {
+        return mix(vec3(0.8f, 0.8f, 0.8f), vec3(0.25f, 0.5f, 1.0f), direction.y);
     }
     else {
         return vec3(0.03f);
     }
-
-    // Solid color
-    // return vec3(0.5f, 0.7f, 1.0f); // Light blue
 }
 
 
@@ -27,7 +24,7 @@ void main() {
 
     // Light sky color
     vec3 sky = sky_color(direction);
-    payload.hit_value = sky;
+    payload.attenuation = sky;
     // payload.attenuation = vec3(1.0, 1.0, 1.0);
     payload.done = 1;
 }

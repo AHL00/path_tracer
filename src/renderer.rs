@@ -18,7 +18,7 @@ use vulkano::{
         PrimaryCommandBufferAbstract,
     },
     descriptor_set::{
-        self, DescriptorSet, WriteDescriptorSet,
+        DescriptorSet, WriteDescriptorSet,
         layout::{
             DescriptorBindingFlags, DescriptorSetLayout, DescriptorSetLayoutBinding,
             DescriptorSetLayoutCreateFlags, DescriptorSetLayoutCreateInfo, DescriptorType,
@@ -28,7 +28,7 @@ use vulkano::{
     image::{Image, sampler::Sampler, view::ImageView},
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
-        PipelineBindPoint, PipelineCreateFlags, PipelineLayout, PipelineShaderStageCreateInfo,
+        PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
         graphics::vertex_input::Vertex,
         layout::{PipelineLayoutCreateInfo, PushConstantRange},
         ray_tracing::{

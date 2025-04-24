@@ -106,7 +106,7 @@ impl VulkanContext {
             descriptor_binding_sampled_image_update_after_bind: true,
             shader_sampled_image_array_dynamic_indexing: true,
             shader_sampled_image_array_non_uniform_indexing: true,
-            runtime_descriptor_array: true, 
+            runtime_descriptor_array: true,
 
             ..DeviceFeatures::empty()
         };
@@ -231,6 +231,7 @@ impl VulkanContext {
                         .into_iter()
                         .next()
                         .unwrap(),
+                    // present_mode: vulkano::swapchain::PresentMode::Immediate,
                     ..Default::default()
                 },
             )
@@ -251,13 +252,14 @@ impl VulkanContext {
             },
         ));
 
-        let descriptor_set_allocator_update_after_bind = Arc::new(StandardDescriptorSetAllocator::new(
-            device.clone(),
-            StandardDescriptorSetAllocatorCreateInfo {
-                update_after_bind: true,
-                ..Default::default()
-            },
-        ));
+        let descriptor_set_allocator_update_after_bind =
+            Arc::new(StandardDescriptorSetAllocator::new(
+                device.clone(),
+                StandardDescriptorSetAllocatorCreateInfo {
+                    update_after_bind: true,
+                    ..Default::default()
+                },
+            ));
 
         let previous_frame_end = Some(vulkano::sync::now(device.clone()).boxed());
 
@@ -427,7 +429,13 @@ impl Texture {
         };
 
         renderer.add_texture_to_lookup_map(image_ident.clone(), texture.clone());
-        log::debug!("Texture loaded: {}, {}x{}, {}mb", image_ident, extent[0], extent[1], mb_size);
+        log::debug!(
+            "Texture loaded: {}, {}x{}, {}mb",
+            image_ident,
+            extent[0],
+            extent[1],
+            mb_size
+        );
 
         texture
     }

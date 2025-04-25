@@ -20,7 +20,7 @@ use winit::{
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
     event::WindowEvent,
     keyboard::{KeyCode, PhysicalKey},
-    platform::windows::{WindowAttributesExtWindows, WindowExtWindows, HWND},
+    platform::windows::{WindowAttributesExtWindows, WindowExtWindows},
     raw_window_handle::RawWindowHandle,
     window::{Window, WindowAttributes, WindowButtons},
 };
@@ -98,7 +98,7 @@ impl RenderApp {
 
         if self._queue_recreate_swapchain {
             context
-                .recreate_swapchain(renderer, context.swapchain.image_extent().into())
+                .handle_resize_recreate_swap(renderer, context.swapchain.image_extent().into())
                 .unwrap();
             self._queue_recreate_swapchain = false;
         }
@@ -160,6 +160,11 @@ impl RenderApp {
             }
         }
 
+        // log::debug!(
+        //     "Rendered to swapchain image {}",
+        //     image_index
+        // );
+
         // Prevent background processing that might mess with buffers
         context.wait_for_previous_frame_end();
     }
@@ -173,7 +178,7 @@ impl ApplicationHandler for RenderApp {
                     .with_title("Vulkan Window")
                     .with_inner_size(LogicalSize::new(1280, 720))
                     .with_enabled_buttons(WindowButtons::empty())
-                    .with_decorations(false)
+                    // .with_decorations(false)
                     .with_resizable(true);
 
                 if let Some(parent_window) = self._parent_window.clone() {
@@ -228,28 +233,31 @@ impl ApplicationHandler for RenderApp {
             let parent_size = parent_size.to_logical::<f32>(parent_window.scale_factor());
             let new_pos = LogicalPosition::new(parent_pos.x + parent_size.width, parent_pos.y);
             let new_pos = new_pos.to_physical::<i32>(parent_window.scale_factor());
-            let new_pos =
-                PhysicalPosition::new(new_pos.x + PARENT_CHILD_GAP, new_pos.y);
+            let new_pos = PhysicalPosition::new(new_pos.x + PARENT_CHILD_GAP, new_pos.y);
             window.set_outer_position(new_pos);
         }
 
         self.context = Some(VulkanContext::new(window));
 
-        let mut renderer = Renderer::new(&self.context.as_ref().unwrap());
+        const DEFAULT_RENDER_RESOLUTION: [u32; 2] = [1280, 720];
+
+        let mut renderer = Renderer::new(&self.context.as_ref().unwrap(), DEFAULT_RENDER_RESOLUTION);
 
         log::info!("Loading GLTF scene...");
 
-        // Scene::import_gltf(
-        //     &mut renderer,
-        //     std::path::Path::new("./assets/sponza/Sponza.gltf"),
-        //     &self.context.as_ref().unwrap(),
-        // )
-        // .unwrap();
+        Scene::import_gltf(
+            &mut renderer,
+            std::path::Path::new("./assets/sponza/Sponza.gltf"),
+            &self.context.as_ref().unwrap(),
+            Vec3::new(0.0, 0.0, 0.0),
+        )
+        .unwrap();
 
         // Scene::import_gltf(
         //     &mut renderer,
         //     std::path::Path::new("./assets/bistro/bistro.gltf"),
         //     &self.context.as_ref().unwrap(),
+        //     Vec3::new(0.0, 0.0, 0.0),
         // )
         // .unwrap();
 
@@ -257,6 +265,7 @@ impl ApplicationHandler for RenderApp {
         //     &mut renderer,
         //     std::path::Path::new("./assets/cornell/cornell.gltf"),
         //     &self.context.as_ref().unwrap(),
+        //     Vec3::new(0.0, 0.0, 0.0),
         // )
         // .unwrap();
 
@@ -276,13 +285,13 @@ impl ApplicationHandler for RenderApp {
         )
         .unwrap();
 
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/spheres/spheres.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::ZERO,
-        )
-        .unwrap();
+        // Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/spheres/spheres.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        //     Vec3::ZERO,
+        // )
+        // .unwrap();
 
         renderer.camera.transform.position = [-1.5, 1.0, 5.0].into();
 
@@ -304,10 +313,13 @@ impl ApplicationHandler for RenderApp {
                         return;
                     }
 
-                    context.wait_for_previous_frame_end();
+                    // Disabled for speed, may cause crashyness
+                    // context.wait_for_previous_frame_end();
+
+                    // Calls the renderer's resize handler inside
                     context
-                        .recreate_swapchain(self.renderer.as_mut().unwrap(), size)
-                        .unwrap();
+                        .handle_resize_recreate_swap(self.renderer.as_mut().unwrap(), size)
+                        .unwrap();                   
                 }
             }
             WindowEvent::CloseRequested => {

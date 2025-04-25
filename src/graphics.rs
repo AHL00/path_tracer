@@ -45,7 +45,7 @@ pub struct VulkanContext {
     pub winit: Arc<winit::window::Window>,
     pub surface: Arc<Surface>,
     pub swapchain: Arc<Swapchain>,
-    pub images: Vec<Arc<Image>>,
+    pub swapchain_images: Vec<Arc<Image>>,
 
     pub previous_frame_end: Option<Box<dyn GpuFuture>>,
 }
@@ -207,7 +207,7 @@ impl VulkanContext {
                     physical_device
                         .image_format_properties(ImageFormatInfo {
                             format: *format,
-                            usage: ImageUsage::STORAGE,
+                            usage: ImageUsage::TRANSFER_DST | ImageUsage::STORAGE,
                             ..Default::default()
                         })
                         .unwrap()
@@ -219,24 +219,30 @@ impl VulkanContext {
                 device.clone(),
                 surface.clone(),
                 SwapchainCreateInfo {
-                    min_image_count: surface_capabilities.min_image_count.max(2),
+                    min_image_count: surface_capabilities.min_image_count,
                     image_format,
                     image_color_space,
                     image_extent: window_size.into(),
-                    // We will directly write to the swapchain images from the ray
-                    // tracing shader. This requires the images to support storage usage.
-                    image_usage: ImageUsage::STORAGE,
+                    // We will blit to the swapchain images, so we need to use a
+                    // transfer dst usage flag.
+                    image_usage: ImageUsage::TRANSFER_DST | ImageUsage::STORAGE,
                     composite_alpha: surface_capabilities
                         .supported_composite_alpha
                         .into_iter()
                         .next()
                         .unwrap(),
-                    // present_mode: vulkano::swapchain::PresentMode::Immediate,
+                    // present_mode: vulkano::swapchain::PresentMode::FifoRelaxed,
                     ..Default::default()
                 },
             )
             .unwrap()
         };
+
+        log::debug!(
+            "Swapchain created: {} images, format: {:?}",
+            images.len(),
+            swapchain.image_format()
+        );
 
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
@@ -275,7 +281,7 @@ impl VulkanContext {
             winit,
             surface,
             swapchain,
-            images,
+            swapchain_images: images,
 
             previous_frame_end,
         }
@@ -285,18 +291,63 @@ impl VulkanContext {
         self.previous_frame_end.as_mut().unwrap().cleanup_finished();
     }
 
-    pub fn recreate_swapchain(
+    pub fn handle_resize_recreate_swap(
         &mut self,
         renderer: &mut Renderer,
         size: PhysicalSize<u32>,
     ) -> Result<(), Validated<VulkanError>> {
+        // If it doesn't match the render resolution aspect, we don't want to allow the swapchain to be resized.
+        let render_aspect =
+            renderer.render_resolution()[0] as f32 / renderer.render_resolution()[1] as f32;
+
+        let window_aspect = size.width as f32 / size.height as f32;
+        if (window_aspect - render_aspect).abs() > 0.01 {
+            let size_delta = [
+                size.width as i32 - self.swapchain.image_extent()[0] as i32,
+                size.height as i32 - self.swapchain.image_extent()[1] as i32,
+            ];
+
+            log::debug!("Swapchain size delta: {}x{}", size_delta[0], size_delta[1]);
+
+            let current_width = self.swapchain.image_extent()[0] as f32;
+            let current_height = self.swapchain.image_extent()[1] as f32;
+
+            let mut new_width = size.width as f32;
+            let mut new_height = size.height as f32;
+
+            let width_based_height = new_width / render_aspect;
+            let height_based_width = new_height * render_aspect;
+
+            let width_change = (new_width - current_width).abs();
+            let height_change = (new_height - current_height).abs();
+
+            if width_change > height_change {
+                new_height = width_based_height;
+            } else {
+                new_width = height_based_width;
+            }
+
+            // If it doesn't match, request a resize that will match the aspect ratio
+            if let None = self.winit.request_inner_size(LogicalSize::new(
+                new_width.round() as u32,
+                new_height.round() as u32,
+            )) {
+                // log::error!("Failed to resize window to match aspect ratio");
+            }
+
+
+
+            return Ok(());
+        }
+
         let (new_swapchain, new_images) = self.swapchain.recreate(SwapchainCreateInfo {
             image_extent: size.into(),
+            image_usage: ImageUsage::TRANSFER_DST | ImageUsage::STORAGE,
             ..self.swapchain.create_info()
         })?;
 
         self.swapchain = new_swapchain;
-        renderer.resize(self, &new_images);
+        self.swapchain_images = new_images.clone();
 
         Ok(())
     }

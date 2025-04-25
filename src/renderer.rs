@@ -1,8 +1,10 @@
-use std::{sync::Arc, u32};
+use std::{fs::File, path::Path, ptr::NonNull, sync::Arc, u32};
 
+use bytes::Buf;
+use image::{Pixel, Rgba};
 use rand::Rng;
 use vulkano::{
-    Packed24_8,
+    NonExhaustive, Packed24_8,
     acceleration_structure::{
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
         AccelerationStructureBuildRangeInfo, AccelerationStructureBuildType,
@@ -14,8 +16,8 @@ use vulkano::{
     },
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
-        AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer,
-        PrimaryCommandBufferAbstract,
+        AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyImageToBufferInfo,
+        PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract,
     },
     descriptor_set::{
         DescriptorSet, WriteDescriptorSet,
@@ -25,7 +27,11 @@ use vulkano::{
         },
     },
     format::Format,
-    image::{Image, sampler::Sampler, view::ImageView},
+    image::{
+        Image, ImageCreateInfo, ImageLayout, ImageSubresourceLayers, ImageUsage,
+        sampler::{self, Sampler},
+        view::ImageView,
+    },
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
         PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
@@ -124,14 +130,15 @@ pub struct PushConstantRequirements {
 pub struct Renderer {
     pub rgen_descriptor_set: Arc<DescriptorSet>,
 
-    pub swapchain_image_sets: Vec<(Arc<ImageView>, Arc<DescriptorSet>)>,
     pub pipeline_layout: Arc<PipelineLayout>,
     pub pipeline: Arc<RayTracingPipeline>,
     pub shader_binding_table: ShaderBindingTable,
     pub push_constant_requirements: PushConstantRequirements,
 
-    // Just a base blas for the tlas
-    // Idk how to make a tlas without a blas for now
+    pub render_texture: Arc<ImageView>,
+    render_resolution: [u32; 2],
+    pub render_texture_descriptor_set: Arc<DescriptorSet>,
+
     pub tlas: Arc<AccelerationStructure>,
 
     // Bindless textures descriptor set
@@ -162,7 +169,7 @@ impl Renderer {
     const MAX_TEXTURE_COUNT: u32 = 5000; // Maximum number of textures
     const RAY_RECURSION_DEPTH: u32 = 2;
 
-    pub fn new(context: &crate::graphics::VulkanContext) -> Self {
+    pub fn new(context: &crate::graphics::VulkanContext, render_resolution: [u32; 2]) -> Self {
         let push_constant_requirements = PushConstantRequirements {
             closest_hit: shaders::closest_hit::load(context.device.clone())
                 .unwrap()
@@ -418,25 +425,6 @@ impl Renderer {
 
         log::info!("Descriptor sets created");
 
-        let swapchain_image_sets = context
-            .images
-            .iter()
-            .map(|image| {
-                let image_view = ImageView::new_default(image.clone()).unwrap();
-                let descriptor_set = DescriptorSet::new(
-                    context.descriptor_set_allocator.clone(),
-                    pipeline_layout.set_layouts()[1].clone(),
-                    [WriteDescriptorSet::image_view(0, image_view.clone())],
-                    [],
-                )
-                .unwrap();
-
-                (image_view, descriptor_set)
-            })
-            .collect();
-
-        log::info!("Swapchain image descriptor sets created");
-
         let shader_binding_table =
             ShaderBindingTable::new(context.memory_allocator.clone(), &pipeline).unwrap();
 
@@ -450,13 +438,41 @@ impl Renderer {
         )
         .unwrap();
 
-        Self {
+        // Recreate the render texture and its descriptor set
+        let render_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: context.swapchain.image_format(),
+                    extent: [render_resolution[0], render_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let render_texture_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            pipeline_layout.set_layouts()[1].clone(),
+            [WriteDescriptorSet::image_view(0, render_texture.clone())],
+            [],
+        )
+        .unwrap();
+
+        let mut res = Self {
             pipeline_layout,
             pipeline,
             rgen_descriptor_set,
             push_constant_requirements,
 
-            swapchain_image_sets,
+            render_texture,
+            render_resolution,
+            // TODO: Configurable?
+            render_texture_descriptor_set,
+
             shader_binding_table,
             bindless_textures_descriptor_set,
             bindless_textures: vec![],
@@ -473,33 +489,182 @@ impl Renderer {
             resized_dirty: false,
             accumulated_count: 0,
             accumulation_limit: u32::MAX,
-        }
+        };
+
+        res.resize_render_buffer(context, render_resolution);
+
+        res
     }
 
-    pub fn resize(
+    pub fn render_resolution(&self) -> [u32; 2] {
+        self.render_resolution
+    }
+
+    pub fn resize_render_buffer(
         &mut self,
         context: &crate::graphics::VulkanContext,
-        new_images: &Vec<Arc<Image>>,
+        new_resolution: [u32; 2],
     ) {
-        // Recreate the swapchain images and their descriptor sets
-        self.swapchain_image_sets = new_images
-            .iter()
-            .map(|image| {
-                let image_view = ImageView::new_default(image.clone()).unwrap();
-                let descriptor_set = DescriptorSet::new(
-                    context.descriptor_set_allocator.clone(),
-                    self.pipeline_layout.set_layouts()[1].clone(),
-                    [WriteDescriptorSet::image_view(0, image_view.clone())],
-                    [],
-                )
-                .unwrap();
+        // Recreate the render texture and its descriptor set
+        self.render_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: context.swapchain.image_format(),
+                    extent: [new_resolution[0], new_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
 
-                (image_view, descriptor_set)
-            })
-            .collect();
+        self.render_resolution = new_resolution;
+
+        self.render_texture_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            self.pipeline_layout.set_layouts()[1].clone(),
+            [WriteDescriptorSet::image_view(
+                0,
+                self.render_texture.clone(),
+            )],
+            [],
+        )
+        .unwrap();
+
+        // Resize window to match the render aspect
+        // Resize handler will handle the swapchain resize
+        // For now, take the height of the window as the constant
+        // and calculate the width based on the render aspect
+        let render_aspect = self.render_resolution[0] as f32 / self.render_resolution[1] as f32;
+        let window_size = context.winit.inner_size();
+        let height = window_size.height as f32;
+        let width = (height * render_aspect) as u32;
+
+        let resize_res = context
+            .winit
+            .request_inner_size(winit::dpi::LogicalSize::new(width as f64, height as f64));
+
+        if let None = resize_res {
+            log::warn!("Failed to resize window to match render aspect ratio");
+        }
 
         self.resized_dirty = true;
     }
+
+    pub fn save_render_texture_to_file(
+        &self,
+        context: &crate::graphics::VulkanContext,
+        file_path: &Path,
+        format: image::ImageFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // If image exists, error
+        if file_path.exists() {
+            return Err("File already exists".into());
+        }
+
+        // This should be a length 1 slice according to the docs
+        let memory_requirements = self.render_texture.image().memory_requirements()[0];
+
+        let staging_buffer = Buffer::new(
+            context.memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_HOST,
+                ..Default::default()
+            },
+            memory_requirements.layout,
+        )?;
+
+        let staging_subbuffer = Subbuffer::new(staging_buffer);
+
+        let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
+            context.command_buffer_allocator.clone(),
+            context.queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
+
+        command_buffer_builder.copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+            self.render_texture.image().clone(),
+            staging_subbuffer.clone(),
+        ))?;
+
+        let copy_future = command_buffer_builder
+            .build()?
+            .execute(context.queue.clone())?;
+
+        copy_future.then_signal_fence_and_flush()?.wait(None)?;
+
+        fn read_nonnull_u8_slice<'a>(ptr: NonNull<[u8]>) -> &'a [u8] {
+            // SAFETY: You must ensure the pointer is valid and the memory is not mutated elsewhere.
+            unsafe {
+                let data_ptr = ptr.as_ptr() as *const u8;
+                let len = (*ptr.as_ptr()).len();
+                std::slice::from_raw_parts(data_ptr, len)
+            }
+        }
+
+        // Copy the data from the staging buffer to a file
+        let data = read_nonnull_u8_slice(staging_subbuffer.mapped_slice()?);
+
+        // Create an RGBA8 image from the data
+        let image = image::RgbaImage::from_raw(
+            self.render_resolution[0],
+            self.render_resolution[1],
+            data.to_vec(),
+        );
+
+        if image.is_none() {
+            return Err("Failed to create image from data".into());
+        }
+
+        let mut file = File::create(file_path)?;
+
+        image.unwrap()
+            .write_to(&mut file, format)
+            .map_err(|e| format!("Failed to write image to file: {}", e))?;
+
+        log::info!("Saved render texture to file: {:?}", file_path);
+
+        Ok(())
+    }
+
+    // TODO This is no longer required, maybe
+    // pub fn resize_window_swapchain(
+    //     &mut self,
+    //     context: &crate::graphics::VulkanContext,
+    //     new_images: &Vec<Arc<Image>>,
+    // ) {
+    //     let current_swap_extent: [u32; 2] = context.swapchain.image_extent();
+    //     let window_size: [u32; 2] = context.winit.inner_size().into();
+
+    //     // Check if the window size is different from the swapchain size
+    //     if current_swap_extent[0] == window_size[0] && current_swap_extent[1] == window_size[1] {
+    //         return;
+    //     }
+
+    //     // If so, resize, but constrain it to the render aspect
+    //     let render_aspect = self.render_resolution[0] as f32 / self.render_resolution[1] as f32;
+
+    //     let new_width = (window_size[1] as f32 * render_aspect) as u32;
+    //     let new_height = window_size[1];
+
+    //     // Resize window to match the render aspect
+    //     let resize_res = context
+    //         .winit
+    //         .request_inner_size(winit::dpi::LogicalSize::new(new_width, new_height));
+
+    //     if let None = resize_res {
+    //         log::warn!("Failed to resize window to match render aspect ratio");
+    //     }
+
+    //     self.resized_dirty = true;
+    // }
 
     /// Update the descriptor set with self.tlas and self.uniform_buffer
     pub fn update_descriptor_set(&mut self, context: &crate::graphics::VulkanContext) {
@@ -568,7 +733,9 @@ impl Renderer {
         let mut query = <(&mut Geometry, &mut Transform, &Material)>::query();
         let mut offsets_vec = vec![];
         // TODO: If the number of meshes doesn't change, we can just update the TLAS
-        for (geometry, transform, material) in query.iter_mut(self.scene.world_mut_dont_mark_dirty()) {
+        for (geometry, transform, material) in
+            query.iter_mut(self.scene.world_mut_dont_mark_dirty())
+        {
             let show_percentage = 100.0;
             let rng = rand::rng().random_range(0.0..100.0);
             if rng > show_percentage {
@@ -699,7 +866,7 @@ impl Renderer {
                 0,
                 vec![
                     self.rgen_descriptor_set.clone(),
-                    self.swapchain_image_sets[image_index as usize].1.clone(),
+                    self.render_texture_descriptor_set.clone(),
                     self.scene.rhit_descriptor_set.clone(),
                     self.bindless_textures_descriptor_set.clone(),
                 ],
@@ -708,10 +875,22 @@ impl Renderer {
             .bind_pipeline_ray_tracing(self.pipeline.clone())
             .unwrap();
 
-        let extent = self.swapchain_image_sets[0].0.image().extent();
+        let extent = self.render_texture.image().extent();
 
         unsafe { builder.trace_rays(self.shader_binding_table.addresses().clone(), extent) }
-            .unwrap();
+            .expect("Failed to trace rays");
+
+        // Draw the render texture to the swapchain image
+        // They are not guaranteed to be the same size, so we need to use a blit command
+        let swapchain_image = context.swapchain_images[image_index as usize].clone();
+        let render_image_view = self.render_texture.clone();
+
+        let blit_image_info =
+            BlitImageInfo::images(render_image_view.image().clone(), swapchain_image.clone());
+
+        builder
+            .blit_image(blit_image_info)
+            .expect("Failed to blit image from render texture to swapchain image");
     }
 }
 

@@ -85,14 +85,33 @@ impl ConfigApp {
     }
 
     pub fn scene(render_app: &mut RenderApp, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-        });
+        egui::CentralPanel::default().show(ctx, |ui| {});
     }
 
     pub fn render(render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if ui.button("Start Render").clicked() {
                 // render_app.start_rendering();
+            }
+
+            if ui.button("Save Image").clicked() {
+                let save_path = rfd::FileDialog::new()
+                    .set_title("Save Image")
+                    .set_file_name("render.png")
+                    .save_file();
+
+                render_app
+                    .renderer
+                    .as_ref()
+                    .unwrap()
+                    .save_render_texture_to_file(
+                        render_app.context.as_ref().unwrap(),
+                        save_path.as_ref().unwrap(),
+                        image::ImageFormat::Png,
+                    )
+                    .unwrap_or_else(|e| {
+                        eprintln!("Failed to save image to {:?}: {}", save_path, e);
+                    });
             }
         });
     }
@@ -101,22 +120,30 @@ impl ConfigApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("Resolution");
 
-            let current_resolution = render_app.context.as_ref().unwrap().winit.inner_size();
-            let current_resolution = (current_resolution.width, current_resolution.height);
+            let current_resolution = render_app.renderer.as_ref().unwrap().render_resolution();
+            let current_resolution = (current_resolution[0], current_resolution[1]);
 
             let mut temp_resolution = current_resolution;
 
             ui.horizontal(|ui| {
                 ui.label("Width:");
-                ui.add(egui::DragValue::new(&mut temp_resolution.0).range(1..=4096));
+                ui.add(
+                    egui::DragValue::new(&mut temp_resolution.0)
+                        .range(1..=4096)
+                        .update_while_editing(false),
+                );
             });
 
             ui.horizontal(|ui| {
                 ui.label("Height:");
-                ui.add(egui::DragValue::new(&mut temp_resolution.1).range(1..=4096));
+                ui.add(
+                    egui::DragValue::new(&mut temp_resolution.1)
+                        .range(1..=4096)
+                        .update_while_editing(false),
+                );
             });
 
-            ui.horizontal(|ui| { 
+            ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("PresetsDropdown")
                     .selected_text(format!("Presets"))
                     .show_ui(ui, |ui| {
@@ -129,12 +156,10 @@ impl ConfigApp {
             });
 
             if temp_resolution != current_resolution {
-                let _ = render_app
-                    .context
-                    .as_ref()
-                    .unwrap()
-                    .winit
-                    .request_inner_size(LogicalSize::new(temp_resolution.0, temp_resolution.1));
+                let _ = render_app.renderer.as_mut().unwrap().resize_render_buffer(
+                    render_app.context.as_ref().unwrap(),
+                    [temp_resolution.0, temp_resolution.1],
+                );
             }
 
             ui.separator();

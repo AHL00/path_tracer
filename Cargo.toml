@@ -41,6 +41,8 @@ egui-wgpu = "0.31.1"
 pollster = "0.4.0"
 oidn = "2.3.2"
 egui = "0.31.1"
+image = "0.25.6"
+rfd = "0.15.3"
 
 [profile.release]
 debug = true

@@ -1,0 +1,13 @@
+[package]
+name = "nrd-sys"
+version = "4.14.3"
+edition = "2024"
+
+
+[build-dependencies]
+cmake = "0.1.54"
+ureq = "3.0.11"
+zip = "2.6.1"
+
+[dependencies]
+vulkano = "0.35.1"

@@ -1,10 +1,14 @@
 use std::{fs::File, path::Path, ptr::NonNull, sync::Arc, u32};
 
 use bytes::Buf;
-use image::{Pixel, Rgba};
+use image::{
+    DynamicImage, ImageFormat, Pixel, Rgb, Rgb32FImage, RgbImage, Rgba, buffer::ConvertBuffer,
+};
+
+use nrd_sys::NrdDenoiser;
 use rand::Rng;
 use vulkano::{
-    NonExhaustive, Packed24_8,
+    Packed24_8,
     acceleration_structure::{
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
         AccelerationStructureBuildRangeInfo, AccelerationStructureBuildType,
@@ -135,9 +139,14 @@ pub struct Renderer {
     pub shader_binding_table: ShaderBindingTable,
     pub push_constant_requirements: PushConstantRequirements,
 
-    pub render_texture: Arc<ImageView>,
+    pub albedo_texture: Arc<ImageView>,
+    pub normal_texture: Arc<ImageView>,
+    pub depth_texture: Arc<ImageView>,
     render_resolution: [u32; 2],
-    pub render_texture_descriptor_set: Arc<DescriptorSet>,
+    pub render_textures_descriptor_set: Arc<DescriptorSet>,
+
+    pub z_near: f32,
+    pub z_far: f32,
 
     pub tlas: Arc<AccelerationStructure>,
 
@@ -158,6 +167,8 @@ pub struct Renderer {
 
     pub camera: crate::camera::Camera,
     pub samples_per_pixel: u32,
+
+    pub oidn_cpu: oidn::Device,
 
     pub prev_cam_state: crate::camera::Camera,
     pub resized_dirty: bool,
@@ -235,15 +246,38 @@ impl Renderer {
                     DescriptorSetLayout::new(
                         context.device.clone(),
                         DescriptorSetLayoutCreateInfo {
-                            bindings: [(
-                                0,
-                                DescriptorSetLayoutBinding {
-                                    stages: ShaderStages::RAYGEN,
-                                    ..DescriptorSetLayoutBinding::descriptor_type(
-                                        DescriptorType::StorageImage,
-                                    )
-                                },
-                            )]
+                            bindings: [
+                                // Albedo
+                                (
+                                    0,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::RAYGEN,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::StorageImage,
+                                        )
+                                    },
+                                ),
+                                // Normal
+                                (
+                                    1,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::RAYGEN,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::StorageImage,
+                                        )
+                                    },
+                                ),
+                                // Depth
+                                (
+                                    2,
+                                    DescriptorSetLayoutBinding {
+                                        stages: ShaderStages::RAYGEN,
+                                        ..DescriptorSetLayoutBinding::descriptor_type(
+                                            DescriptorType::StorageImage,
+                                        )
+                                    },
+                                ),
+                            ]
                             .into_iter()
                             .collect(),
                             ..Default::default()
@@ -439,11 +473,11 @@ impl Renderer {
         .unwrap();
 
         // Recreate the render texture and its descriptor set
-        let render_texture = ImageView::new_default(
+        let albedo_texture = ImageView::new_default(
             Image::new(
                 context.memory_allocator.clone(),
                 ImageCreateInfo {
-                    format: context.swapchain.image_format(),
+                    format: vulkano::format::Format::R32G32B32A32_SFLOAT,
                     extent: [render_resolution[0], render_resolution[1], 1].into(),
                     usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
                     ..Default::default()
@@ -454,13 +488,52 @@ impl Renderer {
         )
         .unwrap();
 
-        let render_texture_descriptor_set = DescriptorSet::new(
+        let normal_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: vulkano::format::Format::R32G32B32A32_SFLOAT,
+                    extent: [render_resolution[0], render_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let depth_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: Format::R32_SFLOAT,
+                    extent: [render_resolution[0], render_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let render_textures_descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             pipeline_layout.set_layouts()[1].clone(),
-            [WriteDescriptorSet::image_view(0, render_texture.clone())],
+            [
+                WriteDescriptorSet::image_view(0, albedo_texture.clone()),
+                WriteDescriptorSet::image_view(1, normal_texture.clone()),
+                WriteDescriptorSet::image_view(2, depth_texture.clone()),
+            ],
             [],
         )
         .unwrap();
+
+        let oidn_cpu = oidn::Device::cpu();
+
+        let nrd =
+            nrd_sys::vulkano::VulkanoNrdInstance::new(&[NrdDenoiser::REBLUR_DIFFUSE]).unwrap();
 
         let mut res = Self {
             pipeline_layout,
@@ -468,10 +541,12 @@ impl Renderer {
             rgen_descriptor_set,
             push_constant_requirements,
 
-            render_texture,
+            albedo_texture,
+            normal_texture,
+            depth_texture,
             render_resolution,
             // TODO: Configurable?
-            render_texture_descriptor_set,
+            render_textures_descriptor_set,
 
             shader_binding_table,
             bindless_textures_descriptor_set,
@@ -484,6 +559,11 @@ impl Renderer {
 
             samples_per_pixel: 1,
             camera: Camera::default(),
+
+            oidn_cpu,
+
+            z_near: 0.1,
+            z_far: 100.0,
 
             prev_cam_state: Camera::default(),
             resized_dirty: false,
@@ -506,11 +586,41 @@ impl Renderer {
         new_resolution: [u32; 2],
     ) {
         // Recreate the render texture and its descriptor set
-        self.render_texture = ImageView::new_default(
+        self.albedo_texture = ImageView::new_default(
             Image::new(
                 context.memory_allocator.clone(),
                 ImageCreateInfo {
-                    format: context.swapchain.image_format(),
+                    format: vulkano::format::Format::R32G32B32A32_SFLOAT,
+                    extent: [new_resolution[0], new_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        self.normal_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: vulkano::format::Format::R32G32B32A32_SFLOAT,
+                    extent: [new_resolution[0], new_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        self.depth_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: Format::R32_SFLOAT,
                     extent: [new_resolution[0], new_resolution[1], 1].into(),
                     usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
                     ..Default::default()
@@ -523,13 +633,14 @@ impl Renderer {
 
         self.render_resolution = new_resolution;
 
-        self.render_texture_descriptor_set = DescriptorSet::new(
+        self.render_textures_descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             self.pipeline_layout.set_layouts()[1].clone(),
-            [WriteDescriptorSet::image_view(
-                0,
-                self.render_texture.clone(),
-            )],
+            [
+                WriteDescriptorSet::image_view(0, self.albedo_texture.clone()),
+                WriteDescriptorSet::image_view(1, self.normal_texture.clone()),
+                WriteDescriptorSet::image_view(2, self.depth_texture.clone()),
+            ],
             [],
         )
         .unwrap();
@@ -554,24 +665,18 @@ impl Renderer {
         self.resized_dirty = true;
     }
 
-    pub fn save_render_texture_to_file(
-        &self,
+    fn copy_image_to_host_vec(
+        image_view: Arc<ImageView>,
         context: &crate::graphics::VulkanContext,
-        file_path: &Path,
-        format: image::ImageFormat,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // If image exists, error
-        if file_path.exists() {
-            return Err("File already exists".into());
-        }
-
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let image = image_view.image();
         // This should be a length 1 slice according to the docs
-        let memory_requirements = self.render_texture.image().memory_requirements()[0];
+        let memory_requirements = image.memory_requirements()[0];
 
         let staging_buffer = Buffer::new(
             context.memory_allocator.clone(),
             BufferCreateInfo {
-                usage: BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                usage: BufferUsage::TRANSFER_DST,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -590,7 +695,7 @@ impl Renderer {
         )?;
 
         command_buffer_builder.copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
-            self.render_texture.image().clone(),
+            image.clone(),
             staging_subbuffer.clone(),
         ))?;
 
@@ -600,32 +705,109 @@ impl Renderer {
 
         copy_future.then_signal_fence_and_flush()?.wait(None)?;
 
-        fn read_nonnull_u8_slice<'a>(ptr: NonNull<[u8]>) -> &'a [u8] {
-            // SAFETY: You must ensure the pointer is valid and the memory is not mutated elsewhere.
-            unsafe {
-                let data_ptr = ptr.as_ptr() as *const u8;
-                let len = (*ptr.as_ptr()).len();
-                std::slice::from_raw_parts(data_ptr, len)
-            }
+        let data = staging_subbuffer.read()?;
+        Ok(data.to_vec())
+    }
+
+    fn copy_image_to_host_vec_f32(
+        image_view: Arc<ImageView>,
+        context: &crate::graphics::VulkanContext,
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        let data_u8 = Self::copy_image_to_host_vec(image_view, context)?;
+
+        if data_u8.len() % size_of::<f32>() != 0 {
+            return Err(format!(
+                "Byte data length ({}) is not a multiple of f32 size ({})",
+                data_u8.len(),
+                size_of::<f32>()
+            )
+            .into());
         }
 
-        // Copy the data from the staging buffer to a file
-        let data = read_nonnull_u8_slice(staging_subbuffer.mapped_slice()?);
+        let num_floats = data_u8.len() / size_of::<f32>();
+        // Vec<f32> guarantees correct alignment.
+        let mut data_f32_vec = Vec::<f32>::with_capacity(num_floats);
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data_u8.as_ptr() as *const f32,
+                data_f32_vec.as_mut_ptr(),
+                num_floats,
+            );
+
+            data_f32_vec.set_len(num_floats);
+        }
+
+        Ok(data_f32_vec)
+    }
+
+    pub fn save_render_texture_to_file(
+        &self,
+        context: &crate::graphics::VulkanContext,
+        file_path: &Path,
+        format: image::ImageFormat,
+        oidn: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // If image exists, error
+        if file_path.exists() {
+            return Err("File already exists".into());
+        }
 
         // Create an RGBA8 image from the data
-        let image = image::RgbaImage::from_raw(
+        let albedo = image::Rgba32FImage::from_raw(
             self.render_resolution[0],
             self.render_resolution[1],
-            data.to_vec(),
-        );
-
-        if image.is_none() {
-            return Err("Failed to create image from data".into());
-        }
+            Self::copy_image_to_host_vec_f32(self.albedo_texture.clone(), context)?,
+        )
+        .ok_or("Failed to create image from data")?;
 
         let mut file = File::create(file_path)?;
 
-        image.unwrap()
+        let albedo = if oidn {
+            let normal = image::Rgba32FImage::from_raw(
+                self.render_resolution[0],
+                self.render_resolution[1],
+                Self::copy_image_to_host_vec_f32(self.normal_texture.clone(), context)?,
+            )
+            .ok_or("Failed to create image from data")?;
+
+            // Convert normal and albedo to RGB8
+            let normal = DynamicImage::from(normal).into_rgb32f();
+            let albedo = DynamicImage::from(albedo).into_rgb32f();
+
+            let mut oidn_ray_tracing = oidn::RayTracing::new(&self.oidn_cpu);
+
+            oidn_ray_tracing.albedo_normal(albedo.as_raw(), normal.as_raw());
+            oidn_ray_tracing.image_dimensions(
+                self.render_resolution[0] as usize,
+                self.render_resolution[1] as usize,
+            );
+            oidn_ray_tracing.filter_quality(oidn::Quality::High);
+
+            let mut albedo_raw = albedo.into_raw();
+
+            oidn_ray_tracing
+                .filter_in_place(&mut albedo_raw)
+                .map_err(|e| format!("Failed to filter image: {:?}", e))?;
+
+            let albedo = Rgb32FImage::from_raw(
+                self.render_resolution[0],
+                self.render_resolution[1],
+                albedo_raw,
+            )
+            .ok_or("Failed to create image from data")?;
+
+            // Convert to RGB8
+            let albedo = DynamicImage::from(albedo).into_rgb8();
+
+            albedo
+        } else {
+            let albedo = DynamicImage::from(albedo).into_rgb8();
+
+            albedo
+        };
+
+        albedo
             .write_to(&mut file, format)
             .map_err(|e| format!("Failed to write image to file: {}", e))?;
 
@@ -822,7 +1004,9 @@ impl Renderer {
                 samples_per_pixel: self.samples_per_pixel,
                 seed: rand::random(),
                 accumulated_count: self.accumulated_count,
-                padding: [0; 1],
+                z_near: self.z_near,
+                z_far: self.z_far,
+                padding: [0; 3],
             },
             camera: shaders::raygen::Camera {
                 view_proj: (proj * view).to_cols_array_2d(),
@@ -836,7 +1020,9 @@ impl Renderer {
                 samples_per_pixel: self.samples_per_pixel,
                 seed: rand::random(),
                 accumulated_count: self.accumulated_count,
-                padding: [0; 1],
+                z_near: self.z_near,
+                z_far: self.z_far,
+                padding: [0; 3],
             },
         };
 
@@ -866,7 +1052,7 @@ impl Renderer {
                 0,
                 vec![
                     self.rgen_descriptor_set.clone(),
-                    self.render_texture_descriptor_set.clone(),
+                    self.render_textures_descriptor_set.clone(),
                     self.scene.rhit_descriptor_set.clone(),
                     self.bindless_textures_descriptor_set.clone(),
                 ],
@@ -875,7 +1061,7 @@ impl Renderer {
             .bind_pipeline_ray_tracing(self.pipeline.clone())
             .unwrap();
 
-        let extent = self.render_texture.image().extent();
+        let extent = self.albedo_texture.image().extent();
 
         unsafe { builder.trace_rays(self.shader_binding_table.addresses().clone(), extent) }
             .expect("Failed to trace rays");
@@ -883,7 +1069,10 @@ impl Renderer {
         // Draw the render texture to the swapchain image
         // They are not guaranteed to be the same size, so we need to use a blit command
         let swapchain_image = context.swapchain_images[image_index as usize].clone();
-        let render_image_view = self.render_texture.clone();
+        let render_image_view = self.albedo_texture.clone();
+        // For debugging:
+        // let render_image_view = self.normal_texture.clone();
+        // let render_image_view = self.depth_texture.clone();
 
         let blit_image_info =
             BlitImageInfo::images(render_image_view.image().clone(), swapchain_image.clone());

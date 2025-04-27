@@ -4,7 +4,12 @@ use std::{
 };
 
 use glam::Vec3;
-use path_tracer::{graphics::VulkanContext, renderer::Renderer, scene::Scene};
+use path_tracer::{
+    graphics::VulkanContext,
+    input::{ButtonState, Input},
+    renderer::Renderer,
+    scene::Scene,
+};
 use vulkano::{
     Validated, VulkanError,
     command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage},
@@ -18,7 +23,7 @@ use vulkano::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
-    event::WindowEvent,
+    event::{MouseButton, WindowEvent},
     keyboard::{KeyCode, PhysicalKey},
     platform::windows::{WindowAttributesExtWindows, WindowExtWindows},
     raw_window_handle::RawWindowHandle,
@@ -62,11 +67,16 @@ impl RenderAppStats {
 }
 
 pub struct RenderApp {
-    pub context: Option<VulkanContext>,
+    pub vulkan_context: Option<VulkanContext>,
     pub renderer: Option<Renderer>,
 
     pub stats: RenderAppStats,
+    pub input: Input,
+    pub mouse_sensitivity: f32,
+    pub move_speed: f32,
 
+    _mouse_locked: bool,
+    _pre_render_update_last: Instant,
     _parent_window: Option<Arc<Window>>,
     _queue_recreate_swapchain: bool,
 }
@@ -74,10 +84,16 @@ pub struct RenderApp {
 impl RenderApp {
     pub fn new() -> Self {
         Self {
-            context: None,
+            vulkan_context: None,
             renderer: None,
-            stats: RenderAppStats::new(),
 
+            stats: RenderAppStats::new(),
+            input: Input::new(),
+            mouse_sensitivity: 0.2,
+            move_speed: 4.0,
+
+            _mouse_locked: false,
+            _pre_render_update_last: Instant::now(),
             _parent_window: None,
             _queue_recreate_swapchain: false,
         }
@@ -91,7 +107,7 @@ impl RenderApp {
     pub fn redraw(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         self.stats.update_frame_start();
 
-        let context = self.context.as_mut().unwrap();
+        let context = self.vulkan_context.as_mut().unwrap();
         let renderer = self.renderer.as_mut().unwrap();
 
         context.wait_for_previous_frame_end();
@@ -168,6 +184,127 @@ impl RenderApp {
         // Prevent background processing that might mess with buffers
         context.wait_for_previous_frame_end();
     }
+
+    pub fn pre_render_update(&mut self) {
+        let now = Instant::now();
+        let delta_time = now.duration_since(self._pre_render_update_last);
+        self._pre_render_update_last = now;
+
+        if let Some(renderer) = &mut self.renderer {
+            match self.input.get_mouse_right() {
+                ButtonState::Pressed => {
+                    // Toggle mouse lock
+                    if self._mouse_locked {
+                        self._mouse_locked = false;
+
+                        self.vulkan_context
+                            .as_ref()
+                            .unwrap()
+                            .winit
+                            .set_cursor_visible(true);
+
+                        let _ = self
+                            .vulkan_context
+                            .as_ref()
+                            .unwrap()
+                            .winit
+                            .set_cursor_grab(winit::window::CursorGrabMode::None);
+                    } else {
+                        self._mouse_locked = true;
+
+                        self.vulkan_context
+                            .as_ref()
+                            .unwrap()
+                            .winit
+                            .set_cursor_visible(false);
+
+                        self.vulkan_context
+                            .as_ref()
+                            .unwrap()
+                            .winit
+                            .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                            .unwrap();
+                    }
+                }
+                ButtonState::Held => {}
+                ButtonState::Released => {}
+            }
+
+            if self._mouse_locked {
+                let delta_s = delta_time.as_secs_f32();
+                let mouse_delta = self.input.get_raw_mouse_delta();
+                let yaw_delta = -mouse_delta.0 * self.mouse_sensitivity * delta_s;
+                let pitch_delta = -mouse_delta.1 * self.mouse_sensitivity * delta_s;
+
+                // Apply yaw around the global Y axis
+                renderer.camera.transform.rotation =
+                    glam::Quat::from_rotation_y(yaw_delta) * renderer.camera.transform.rotation;
+                // Apply pitch around the local X axis
+                renderer.camera.transform.rotation *= glam::Quat::from_rotation_x(pitch_delta);
+            }
+
+            // Keyboard movement
+            let mut current_move_speed = self.move_speed;
+
+            match self.input.get_key_state(KeyCode::ShiftLeft) {
+                ButtonState::Pressed | ButtonState::Held => {
+                    current_move_speed *= 2.0;
+                }
+                _ => {}
+            }
+
+            let mut move_vector = Vec3::ZERO;
+
+            match self.input.get_key_state(KeyCode::KeyW) {
+                ButtonState::Pressed | ButtonState::Held => {
+                    move_vector += renderer.camera.transform.forward();
+                }
+                _ => {}
+            }
+
+            match self.input.get_key_state(KeyCode::KeyS) {
+                ButtonState::Pressed | ButtonState::Held => {
+                    move_vector -= renderer.camera.transform.forward();
+                }
+                _ => {}
+            }
+
+            match self.input.get_key_state(KeyCode::KeyA) {
+                ButtonState::Pressed | ButtonState::Held => {
+                    move_vector -= renderer.camera.transform.right();
+                }
+                _ => {}
+            }
+
+            match self.input.get_key_state(KeyCode::KeyD) {
+                ButtonState::Pressed | ButtonState::Held => {
+                    move_vector += renderer.camera.transform.right();
+                }
+                _ => {}
+            }
+
+            match self.input.get_key_state(KeyCode::Space) {
+                ButtonState::Pressed | ButtonState::Held => {
+                    move_vector += renderer.camera.transform.up();
+                }
+                _ => {}
+            }
+
+            match self.input.get_key_state(KeyCode::ControlLeft) {
+                ButtonState::Pressed | ButtonState::Held => {
+                    move_vector -= renderer.camera.transform.up();
+                }
+                _ => {}
+            }
+
+            renderer.camera.transform.position +=
+                move_vector.normalize_or_zero() * current_move_speed * delta_time.as_secs_f32();
+        }
+    }
+
+    pub fn post_frame(&mut self) {
+        self.input.end_frame();
+    }
 }
 
 impl ApplicationHandler for RenderApp {
@@ -237,21 +374,24 @@ impl ApplicationHandler for RenderApp {
             window.set_outer_position(new_pos);
         }
 
-        self.context = Some(VulkanContext::new(window));
+        self.vulkan_context = Some(VulkanContext::new(window));
 
         const DEFAULT_RENDER_RESOLUTION: [u32; 2] = [1280, 720];
 
-        let mut renderer = Renderer::new(&self.context.as_ref().unwrap(), DEFAULT_RENDER_RESOLUTION);
+        let mut renderer = Renderer::new(
+            &self.vulkan_context.as_ref().unwrap(),
+            DEFAULT_RENDER_RESOLUTION,
+        );
 
         log::info!("Loading GLTF scene...");
 
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/sponza/Sponza.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::new(0.0, 0.0, 0.0),
-        )
-        .unwrap();
+        // Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/sponza/Sponza.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        //     Vec3::new(0.0, 0.0, 0.0),
+        // )
+        // .unwrap();
 
         // Scene::import_gltf(
         //     &mut renderer,
@@ -272,7 +412,7 @@ impl ApplicationHandler for RenderApp {
         Scene::import_gltf(
             &mut renderer,
             std::path::Path::new("./assets/lion_head_2k/lion_head_2k.gltf"),
-            &self.context.as_ref().unwrap(),
+            &self.vulkan_context.as_ref().unwrap(),
             Vec3::new(2.0, 0.0, 0.0),
         )
         .unwrap();
@@ -280,24 +420,33 @@ impl ApplicationHandler for RenderApp {
         Scene::import_gltf(
             &mut renderer,
             std::path::Path::new("./assets/boulder_01_2k/boulder_01_2k.gltf"),
-            &self.context.as_ref().unwrap(),
+            &self.vulkan_context.as_ref().unwrap(),
             Vec3::new(-2.0, 0.0, 0.0),
         )
         .unwrap();
 
-        // Scene::import_gltf(
-        //     &mut renderer,
-        //     std::path::Path::new("./assets/spheres/spheres.gltf"),
-        //     &self.context.as_ref().unwrap(),
-        //     Vec3::ZERO,
-        // )
-        // .unwrap();
+        Scene::import_gltf(
+            &mut renderer,
+            std::path::Path::new("./assets/spheres/spheres.gltf"),
+            &self.vulkan_context.as_ref().unwrap(),
+            Vec3::ZERO,
+        )
+        .unwrap();
 
         renderer.camera.transform.position = [-1.5, 1.0, 5.0].into();
 
         log::info!("GLTF scene loaded");
 
         self.renderer = Some(renderer);
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        device_id: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        self.input.handle_device_event(&event, device_id);
     }
 
     fn window_event(
@@ -308,7 +457,7 @@ impl ApplicationHandler for RenderApp {
     ) {
         match event {
             WindowEvent::Resized(size) => {
-                if let Some(context) = &mut self.context {
+                if let Some(context) = &mut self.vulkan_context {
                     if size.width <= 0 || size.height <= 0 {
                         return;
                     }
@@ -319,7 +468,7 @@ impl ApplicationHandler for RenderApp {
                     // Calls the renderer's resize handler inside
                     context
                         .handle_resize_recreate_swap(self.renderer.as_mut().unwrap(), size)
-                        .unwrap();                   
+                        .unwrap();
                 }
             }
             WindowEvent::CloseRequested => {
@@ -328,74 +477,64 @@ impl ApplicationHandler for RenderApp {
             WindowEvent::RedrawRequested => {
                 panic!("This is supposed to be handled in main.rs");
             }
-            WindowEvent::KeyboardInput {
+            WindowEvent::MouseInput {
                 device_id,
-                event,
-                is_synthetic,
+                state,
+                button,
             } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    match code {
+                self.input.handle_mouse_event(device_id, state, button);
+            }
+            WindowEvent::MouseWheel {
+                device_id,
+                delta,
+                phase,
+            } => {
+                // self.input.handle_mouse_wheel(delta);
+            }
+            WindowEvent::CursorMoved {
+                device_id,
+                position,
+            } => {
+                self.input.handle_mouse_move(
+                    self.vulkan_context.as_ref().unwrap(),
+                    position.x as f32,
+                    position.y as f32,
+                );
+            }
+            WindowEvent::KeyboardInput {
+                device_id, event, ..
+            } => match event.physical_key {
+                PhysicalKey::Code(key_code) => {
+                    match key_code {
                         KeyCode::Escape => {
                             event_loop.exit();
                         }
-                        KeyCode::KeyW => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position +=
-                                    0.1 * renderer.camera.transform.forward();
+                        KeyCode::F11 => {
+                            if let Some(context) = &mut self.vulkan_context {
+                                context.winit.set_fullscreen(None);
                             }
                         }
-                        KeyCode::KeyS => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position -=
-                                    0.1 * renderer.camera.transform.forward();
-                            }
-                        }
-                        KeyCode::KeyA => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position -=
-                                    0.1 * renderer.camera.transform.right();
-                            }
-                        }
-                        KeyCode::KeyD => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position +=
-                                    0.1 * renderer.camera.transform.right();
-                            }
-                        }
-                        KeyCode::Space => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position +=
-                                    0.1 * renderer.camera.transform.up();
-                            }
-                        }
-                        KeyCode::KeyC => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position -=
-                                    0.1 * renderer.camera.transform.up();
-                            }
-                        }
-                        KeyCode::ArrowLeft => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.rotation *=
-                                    glam::Quat::from_rotation_y(0.1);
-                            }
-                        }
-                        KeyCode::ArrowRight => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.rotation *=
-                                    glam::Quat::from_rotation_y(-0.1);
+                        KeyCode::F12 => {
+                            if let Some(context) = &mut self.vulkan_context {
+                                context.winit.set_fullscreen(None);
                             }
                         }
                         _ => {}
                     }
+
+                    self.input
+                        .handle_key_event(device_id, event.state, key_code);
                 }
-            }
+                PhysicalKey::Unidentified(native_key_code) => {
+                    log::warn!("Unidentified key code: {native_key_code:?}");
+                }
+            },
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
-        if let Some(context) = &mut self.context {
+        if let Some(context) = &mut self.vulkan_context {
             context.winit.request_redraw();
         }
     }
@@ -403,6 +542,6 @@ impl ApplicationHandler for RenderApp {
 
 impl RenderApp {
     pub fn window_id(&self) -> Option<winit::window::WindowId> {
-        self.context.as_ref().map(|c| c.winit.id())
+        self.vulkan_context.as_ref().map(|c| c.winit.id())
     }
 }

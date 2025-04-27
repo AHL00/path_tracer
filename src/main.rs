@@ -57,7 +57,7 @@ impl winit::application::ApplicationHandler for MainApp {
         );
         self.render_app.resumed(event_loop);
         self.config_app
-            .set_child_window(self.render_app.context.as_ref().unwrap().winit.clone());
+            .set_child_window(self.render_app.vulkan_context.as_ref().unwrap().winit.clone());
     }
 
     fn window_event(
@@ -67,9 +67,12 @@ impl winit::application::ApplicationHandler for MainApp {
         event: winit::event::WindowEvent,
     ) {
         if let winit::event::WindowEvent::RedrawRequested = event {
+            self.render_app.pre_render_update();
             // Stupid workaround cause of winit only sending redraw events to the focused window
             self.render_app.redraw(event_loop);
             self.config_app.redraw(event_loop, &mut self.render_app);
+            
+            self.render_app.post_frame();
             return;
         }
 

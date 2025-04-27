@@ -33,6 +33,20 @@ pub struct ConfigApp {
 
     pub current_screen: ConfigAppScreen,
     _child_window: Option<Arc<Window>>,
+
+    state: ConfigAppState,
+}
+
+pub struct ConfigAppState {
+    save_image_oidn: bool,
+}
+
+impl Default for ConfigAppState {
+    fn default() -> Self {
+        Self {
+            save_image_oidn: false,
+        }
+    }
 }
 
 impl ConfigApp {
@@ -49,6 +63,7 @@ impl ConfigApp {
             egui_renderer: None,
             current_screen: ConfigAppScreen::Stats,
             _child_window: None,
+            state: ConfigAppState::default(),
         }
     }
 }
@@ -63,6 +78,7 @@ pub enum ConfigAppScreen {
 
 impl ConfigApp {
     pub fn main_screen(
+        state: &mut ConfigAppState,
         current_screen: &mut ConfigAppScreen,
         render_app: &mut RenderApp,
         ctx: &egui::Context,
@@ -77,22 +93,30 @@ impl ConfigApp {
         });
 
         match current_screen {
-            ConfigAppScreen::Stats => Self::stats(render_app, ctx),
-            ConfigAppScreen::Scene => Self::scene(render_app, ctx),
-            ConfigAppScreen::Settings => Self::settings(render_app, ctx),
-            ConfigAppScreen::Render => Self::render(render_app, ctx),
+            ConfigAppScreen::Stats => Self::stats(state, render_app, ctx),
+            ConfigAppScreen::Scene => Self::scene(state, render_app, ctx),
+            ConfigAppScreen::Settings => Self::settings(state, render_app, ctx),
+            ConfigAppScreen::Render => Self::render(state, render_app, ctx),
         }
     }
 
-    pub fn scene(render_app: &mut RenderApp, ctx: &egui::Context) {
+    pub fn scene(state: &mut ConfigAppState, render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {});
     }
 
-    pub fn render(render_app: &mut RenderApp, ctx: &egui::Context) {
+    pub fn render(state: &mut ConfigAppState, render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             if ui.button("Start Render").clicked() {
                 // render_app.start_rendering();
             }
+
+            ui.separator();
+
+            ui.label("Save Image");
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut state.save_image_oidn, "OpenImageDenoise");
+            });
 
             if ui.button("Save Image").clicked() {
                 let save_path = rfd::FileDialog::new()
@@ -100,14 +124,19 @@ impl ConfigApp {
                     .set_file_name("render.png")
                     .save_file();
 
+                if let None = save_path {
+                    return;
+                }
+
                 render_app
                     .renderer
                     .as_ref()
                     .unwrap()
                     .save_render_texture_to_file(
-                        render_app.context.as_ref().unwrap(),
+                        render_app.vulkan_context.as_ref().unwrap(),
                         save_path.as_ref().unwrap(),
                         image::ImageFormat::Png,
+                        state.save_image_oidn,
                     )
                     .unwrap_or_else(|e| {
                         eprintln!("Failed to save image to {:?}: {}", save_path, e);
@@ -116,7 +145,7 @@ impl ConfigApp {
         });
     }
 
-    pub fn settings(render_app: &mut RenderApp, ctx: &egui::Context) {
+    pub fn settings(state: &mut ConfigAppState, render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("Resolution");
 
@@ -157,7 +186,7 @@ impl ConfigApp {
 
             if temp_resolution != current_resolution {
                 let _ = render_app.renderer.as_mut().unwrap().resize_render_buffer(
-                    render_app.context.as_ref().unwrap(),
+                    render_app.vulkan_context.as_ref().unwrap(),
                     [temp_resolution.0, temp_resolution.1],
                 );
             }
@@ -184,6 +213,26 @@ impl ConfigApp {
                 ui.add(egui::DragValue::new(&mut test).range(1..=1000));
             });
 
+            ui.horizontal(|ui| {
+                ui.label("Mouse Sensitivity:");
+                ui.add(egui::DragValue::new(&mut render_app.mouse_sensitivity).range(0.0..=10.0));
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Camera Speed:");
+                ui.add(egui::DragValue::new(&mut render_app.move_speed).range(0.0..=100.0));
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Camera FOV:");
+                let fov_y = render_app.renderer.as_ref().unwrap().camera.fov_y;
+                let mut fov_y_deg = fov_y.to_degrees();
+                
+                ui.add(egui::DragValue::new(&mut fov_y_deg).range(0.0..=180.0));
+
+                render_app.renderer.as_mut().unwrap().camera.fov_y = fov_y_deg.to_radians();
+            });
+
             ui.separator();
 
             ui.label("Denoising Settings");
@@ -195,7 +244,7 @@ impl ConfigApp {
         });
     }
 
-    pub fn stats(render_app: &mut RenderApp, ctx: &egui::Context) {
+    pub fn stats(state: &mut ConfigAppState, render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label(format!(
                 "FPS: {:.2}",
@@ -253,6 +302,11 @@ impl ConfigApp {
                 "Accumulation Count: {}",
                 render_app.renderer.as_ref().unwrap().accumulated_count
             ));
+
+            ui.label(format!(
+                "Raw Mouse Delta: {:?}",
+                render_app.input.get_raw_mouse_delta()
+            ));
         });
     }
 
@@ -284,7 +338,12 @@ impl ConfigApp {
         // Begin to draw the UI frame.
         platform.begin_pass();
 
-        Self::main_screen(&mut self.current_screen, render_app, &platform.context());
+        Self::main_screen(
+            &mut self.state,
+            &mut self.current_screen,
+            render_app,
+            &platform.context(),
+        );
 
         // End the UI frame. We could now handle the output and draw the UI with the backend.
         let output = platform.end_pass(Some(&self.window.as_ref().unwrap()));

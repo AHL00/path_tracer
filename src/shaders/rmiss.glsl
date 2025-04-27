@@ -7,7 +7,7 @@ layout(location = 0) rayPayloadInEXT RayPayload payload;
 
 vec3 sky_color(vec3 direction) {
     if (direction.y > 0.0f) {
-        return mix(vec3(66.0f, 66.0f, 66.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
+        return mix(vec3(1.0f, 1.0f, 1.0f), vec3(0.25f, 0.5f, 1.0f), direction.y);
     }
     else {
         return vec3(0.03f);
@@ -27,4 +27,8 @@ void main() {
     payload.attenuation = sky;
     // payload.attenuation = vec3(1.0, 1.0, 1.0);
     payload.done = 1;
+
+    const float FLOAT_MAX = 3.402823466e+38;
+    payload.dist = FLOAT_MAX;
+    payload.normal = vec3(0.0, 0.0, 0.0);
 }

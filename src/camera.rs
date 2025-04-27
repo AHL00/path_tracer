@@ -16,7 +16,7 @@ impl Default for Camera {
         // transform.rotation = glam::Quat::from_rotation_y(PI);
         Self {
             transform,
-            fov_y: 80.0_f32.to_radians(),
+            fov_y: 70.0_f32.to_radians(),
             near: 0.1,
             far: 1000.0,
         }

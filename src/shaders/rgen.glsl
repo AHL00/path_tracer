@@ -4,7 +4,9 @@
 #include "shared.glsl"
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT top_level_as;
-layout(set = 1, binding = 0, rgba32f) uniform image2D image;
+layout(set = 1, binding = 0, rgba32f) uniform image2D albedo_texture;
+layout(set = 1, binding = 1, rgba32f) uniform image2D normal_texture;
+layout(set = 1, binding = 2, rgba32f) uniform image2D depth_texture;
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
 
@@ -44,18 +46,21 @@ void main() {
     payload.in_uv = in_uv;
 
     // Randomize the ray direction
-    vec3 rand_dir = cosine_hemisphere_sample(
-        in_uv, 
-        0,
-        push_constants.uniforms.accumulated_count,
-        push_constants.uniforms.seed, 
-        direction
-    );
-    payload.direction = normalize(direction + rand_dir * 0.0005);
-    // payload.direction = direction.xyz;
+    // vec3 rand_dir = cosine_hemisphere_sample(
+    //     in_uv, 
+    //     0,
+    //     push_constants.uniforms.accumulated_count,
+    //     push_constants.uniforms.seed, 
+    //     direction
+    // );
+    // payload.direction = normalize(direction + rand_dir * 0.0005);
+
+    // Can't randomise this anymore cause we need
+    // normals and depth info for denoising
+    payload.direction = direction.xyz;
 
     vec3 attenuation = vec3(1.0);
-    
+
     for(;;)
     {
         traceRayEXT(
@@ -73,8 +78,26 @@ void main() {
         );      
         
         attenuation *= payload.attenuation;
-        
 
+        // Onlu store the first hit's normal and distance
+        if (payload.depth == 0) {
+            // Store only if first frame accumulating, cause it shouldn't change
+            if (push_constants.uniforms.accumulated_count == 0) {
+                float depth = payload.dist;
+
+                // Turn world space depth into screen space depth using z_near and z_far
+                float z_near = push_constants.uniforms.z_near;
+                float z_far = push_constants.uniforms.z_far;
+
+                float z_range = z_far - z_near;
+                float z_normalized = (depth - z_near) / z_range;
+                z_normalized = clamp(z_normalized, 0.0, 1.0);
+                
+                imageStore(depth_texture, ivec2(gl_LaunchIDEXT.xy), vec4(z_normalized, 0.0, 0.0, 0.0));
+                imageStore(normal_texture, ivec2(gl_LaunchIDEXT.xy), vec4(payload.normal, 1.0));
+            }
+        }
+        
         payload.depth++;
         if(payload.done == 1 || payload.depth >= MAX_DEPTH)
             break;
@@ -100,7 +123,7 @@ void main() {
 
     float accumulated_count = float(push_constants.uniforms.accumulated_count);
 
-    vec3 current_image_value = imageLoad(image, ivec2(gl_LaunchIDEXT.xy)).xyz;
+    vec3 current_image_value = imageLoad(albedo_texture, ivec2(gl_LaunchIDEXT.xy)).xyz;
     vec3 scaled_down_current_value = current_image_value * accumulated_count / (accumulated_count + 1.0);
 
     vec3 scaled_down_attenuation = attenuation / (accumulated_count + 1.0);
@@ -115,7 +138,7 @@ void main() {
 
     vec3 new_average_value = (scaled_down_attenuation + scaled_down_current_value);
 
-    imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(new_average_value, 1.0));
+    imageStore(albedo_texture, ivec2(gl_LaunchIDEXT.xy), vec4(new_average_value, 1.0));
 
 
     // imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(cosine_hemisphere_sample(

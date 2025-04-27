@@ -43,6 +43,9 @@ struct RayPayload {
     vec3 origin;
     vec3 direction;
     vec2 in_uv;
+
+    vec3 normal;
+    float dist;
 };
 
 struct RendererUniforms {
@@ -50,7 +53,10 @@ struct RendererUniforms {
     uint seed;
     // The number of frames already accumulated in the accumulation buffer
     uint accumulated_count;
-    uint padding[1];
+    // For depth normalisation
+    float z_near;
+    float z_far;
+    uint padding[3];
 };
 
 // float rand(vec2 uv, float depth, uint frame_seed) {

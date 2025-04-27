@@ -559,7 +559,7 @@ impl Transform {
             self.dirty = false;
             self.matrix = glam::Mat4::from_scale_rotation_translation(
                 self.scale,
-                self.rotation,
+                self.rotation.normalize(),
                 self.position,
             );
         }

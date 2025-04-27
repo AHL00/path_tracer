@@ -307,8 +307,6 @@ impl VulkanContext {
                 size.height as i32 - self.swapchain.image_extent()[1] as i32,
             ];
 
-            log::debug!("Swapchain size delta: {}x{}", size_delta[0], size_delta[1]);
-
             let current_width = self.swapchain.image_extent()[0] as f32;
             let current_height = self.swapchain.image_extent()[1] as f32;
 

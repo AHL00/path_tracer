@@ -249,6 +249,9 @@ void main() {
     payload.done = should_scatter ? 0 : 1;
     
     payload.hit_value = vec3(0.0); 
+
+    payload.normal = normal;
+    payload.dist = length(payload.origin - gl_WorldRayOriginEXT);
     
     // Russian roulette
     // if (payload.depth > 3) {

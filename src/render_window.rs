@@ -69,9 +69,15 @@ pub struct RenderApp {
 
     _parent_window: Option<Arc<Window>>,
     _queue_recreate_swapchain: bool,
-    
+
     // Input state for camera
-    keys_pressed: [bool; 8], // W, S, A, D, Space, C, Left, Right
+    keys_pressed: [bool; 9], // W, S, A, D, Space, C, (unused), (unused), Shift
+
+    // Mouse state
+    mouse_position: Option<(f64, f64)>,
+    mouse_prev_position: Option<(f64, f64)>,
+    mouse_captured: bool,
+    mouse_capture_start: Option<(f64, f64)>, // Position where right-click started
 }
 
 impl RenderApp {
@@ -83,7 +89,11 @@ impl RenderApp {
 
             _parent_window: None,
             _queue_recreate_swapchain: false,
-            keys_pressed: [false; 8],
+            keys_pressed: [false; 9],
+            mouse_position: None,
+            mouse_prev_position: None,
+            mouse_captured: false,
+            mouse_capture_start: None,
         }
     }
 
@@ -92,48 +102,96 @@ impl RenderApp {
         self._parent_window = Some(window.clone());
     }
 
-    pub fn redraw(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    pub fn redraw(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
         self.stats.update_frame_start();
 
         // Update camera based on pressed keys with smooth delta_time movement
-        let delta_time = self.stats.last_second_delta_time.as_secs_f32();
-        let movement_speed = 5.0; // units per second
-        let rotation_speed = 2.0; // radians per second
-        
+        let mut delta_time = self.stats.last_second_delta_time.as_secs_f32();
+
+        // Clamp delta time to prevent huge jumps on first frame or after stalls
+        const MAX_DELTA_TIME: f32 = 0.05; // 50ms max per frame (20 FPS minimum)
+        if delta_time > MAX_DELTA_TIME {
+            delta_time = MAX_DELTA_TIME;
+        }
+
+        let mut movement_speed = if let Some(renderer) = &self.renderer {
+            renderer.movement_speed
+        } else {
+            5.0
+        };
+
+        // Apply speed boost when shift is held
+        if self.keys_pressed[8] {
+            // Shift
+            movement_speed *= 2.5; // 2.5x faster when sprinting
+        }
+
         if let Some(renderer) = &mut self.renderer {
             let forward = renderer.camera.transform.forward();
             let right = renderer.camera.transform.right();
             let up = renderer.camera.transform.up();
-            
-            // Position movement
-            if self.keys_pressed[0] { // W
+
+            // Position movement with WASD keys
+            if self.keys_pressed[0] {
+                // W
                 renderer.camera.transform.position += movement_speed * delta_time * forward;
             }
-            if self.keys_pressed[1] { // S
+            if self.keys_pressed[1] {
+                // S
                 renderer.camera.transform.position -= movement_speed * delta_time * forward;
             }
-            if self.keys_pressed[2] { // A
+            if self.keys_pressed[2] {
+                // A
                 renderer.camera.transform.position -= movement_speed * delta_time * right;
             }
-            if self.keys_pressed[3] { // D
+            if self.keys_pressed[3] {
+                // D
                 renderer.camera.transform.position += movement_speed * delta_time * right;
             }
-            if self.keys_pressed[4] { // Space
+            if self.keys_pressed[4] {
+                // Space
                 renderer.camera.transform.position += movement_speed * delta_time * up;
             }
-            if self.keys_pressed[5] { // C
+            if self.keys_pressed[5] {
+                // C
                 renderer.camera.transform.position -= movement_speed * delta_time * up;
             }
-            
-            // Rotation movement
-            if self.keys_pressed[6] { // Left Arrow
-                renderer.camera.transform.rotation *=
-                    glam::Quat::from_rotation_y(rotation_speed * delta_time);
+
+            const SENSITIVITY_MULTIPLIER: f32 = 0.0025;
+
+            // Mouse-based rotation when right button is held
+            if self.mouse_captured {
+                if let (Some((curr_x, curr_y)), Some((prev_x, prev_y))) =
+                    (self.mouse_position, self.mouse_prev_position)
+                {
+                    let delta_x = (curr_x - prev_x) as f32;
+                    let delta_y = (curr_y - prev_y) as f32;
+
+                    if delta_x != 0.0 || delta_y != 0.0 {
+                        // Extract current euler angles to maintain FPS-style camera
+                        let (mut yaw, mut pitch, _roll) = renderer
+                            .camera
+                            .transform
+                            .rotation
+                            .to_euler(glam::EulerRot::YXZ);
+
+                        // Update yaw (horizontal) - no clamping needed
+                        yaw -= delta_x * renderer.mouse_sensitivity * SENSITIVITY_MULTIPLIER;
+
+                        // Update pitch (vertical) with clamping to prevent over-rotation
+                        pitch -= delta_y * renderer.mouse_sensitivity * SENSITIVITY_MULTIPLIER;
+                        const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.1; // ~89 degrees
+                        pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+
+                        // Reconstruct quaternion with roll locked to 0
+                        renderer.camera.transform.rotation =
+                            glam::Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, 0.0);
+                    }
+                }
             }
-            if self.keys_pressed[7] { // Right Arrow
-                renderer.camera.transform.rotation *=
-                    glam::Quat::from_rotation_y(-rotation_speed * delta_time);
-            }
+
+            // Update previous mouse position for next frame
+            self.mouse_prev_position = self.mouse_position;
         }
 
         let context = self.context.as_mut().unwrap();
@@ -286,17 +344,27 @@ impl ApplicationHandler for RenderApp {
 
         const DEFAULT_RENDER_RESOLUTION: [u32; 2] = [1280, 720];
 
-        let mut renderer = Renderer::new(&self.context.as_ref().unwrap(), DEFAULT_RENDER_RESOLUTION);
+        let mut renderer =
+            Renderer::new(&self.context.as_ref().unwrap(), DEFAULT_RENDER_RESOLUTION);
+
+        log::info!("Loading HDRI...");
+
+        renderer.load_hdri(
+            self.context.as_ref().unwrap(),
+            std::path::Path::new("./assets/hdri/meadow_2_4k.exr"),
+        )
+        .expect("Failed to load default HDRI");
 
         log::info!("Loading GLTF scene...");
 
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/sponza/Sponza.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::new(0.0, 0.0, 0.0),
-        )
-        .unwrap();
+        // Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/sponza/Sponza.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        //     Vec3::new(0.0, 0.0, 0.0),
+        //     2.0,
+        // )
+        // .unwrap();
 
         // Scene::import_gltf(
         //     &mut renderer,
@@ -316,9 +384,19 @@ impl ApplicationHandler for RenderApp {
 
         Scene::import_gltf(
             &mut renderer,
+            std::path::Path::new("./assets/toy_car/ToyCar.gltf"),
+            &self.context.as_ref().unwrap(),
+            Vec3::new(0.0, 0.0, 0.0),
+            100.0,
+        )
+        .unwrap();
+
+        Scene::import_gltf(
+            &mut renderer,
             std::path::Path::new("./assets/lion_head_2k/lion_head_2k.gltf"),
             &self.context.as_ref().unwrap(),
-            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+            5.0,
         )
         .unwrap();
 
@@ -326,7 +404,8 @@ impl ApplicationHandler for RenderApp {
             &mut renderer,
             std::path::Path::new("./assets/boulder_01_2k/boulder_01_2k.gltf"),
             &self.context.as_ref().unwrap(),
-            Vec3::new(-2.0, 0.0, 0.0),
+            Vec3::new(-4.0, 0.0, 0.0),
+            1.0,
         )
         .unwrap();
 
@@ -364,7 +443,7 @@ impl ApplicationHandler for RenderApp {
                     // Calls the renderer's resize handler inside
                     context
                         .handle_resize_recreate_swap(self.renderer.as_mut().unwrap(), size)
-                        .unwrap();                   
+                        .unwrap();
                 }
             }
             WindowEvent::CloseRequested => {
@@ -373,13 +452,10 @@ impl ApplicationHandler for RenderApp {
             WindowEvent::RedrawRequested => {
                 panic!("This is supposed to be handled in main.rs");
             }
-            WindowEvent::KeyboardInput {
-                event,
-                ..
-            } => {
+            WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let is_pressed = event.state == winit::event::ElementState::Pressed;
-                    
+
                     match code {
                         KeyCode::Escape => {
                             event_loop.exit();
@@ -402,13 +478,72 @@ impl ApplicationHandler for RenderApp {
                         KeyCode::KeyC => {
                             self.keys_pressed[5] = is_pressed;
                         }
-                        KeyCode::ArrowLeft => {
-                            self.keys_pressed[6] = is_pressed;
-                        }
-                        KeyCode::ArrowRight => {
-                            self.keys_pressed[7] = is_pressed;
+                        KeyCode::ShiftLeft | KeyCode::ShiftRight => {
+                            self.keys_pressed[8] = is_pressed;
                         }
                         _ => {}
+                    }
+                }
+            }
+            WindowEvent::MouseInput { button, state, .. } => {
+                use winit::event::{ElementState, MouseButton};
+                if button == MouseButton::Right {
+                    if state == ElementState::Pressed {
+                        // Right click pressed - capture starting position, hide cursor, lock mouse
+                        self.mouse_captured = true;
+                        self.mouse_capture_start = self.mouse_position;
+                        
+                        if let Some(context) = &self.context {
+                            let _ = context.winit.set_cursor_visible(false);
+                        }
+                    } else {
+                        // Right click released - show cursor and unlock
+                        self.mouse_captured = false;
+                        self.mouse_capture_start = None;
+                        
+                        if let Some(context) = &self.context {
+                            let _ = context.winit.set_cursor_visible(true);
+                        }
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_position = Some((position.x, position.y));
+                
+                // When mouse is captured, wrap it at screen edges
+                if self.mouse_captured {
+                    if let Some(context) = &self.context {
+                        let window = &context.winit;
+                        let size = window.inner_size();
+                        let width = size.width as f64;
+                        let height = size.height as f64;
+                        
+                        let mut new_x = position.x;
+                        let mut new_y = position.y;
+                        let margin = 5.0; // Wrap when near edge
+                        
+                        // Wrap horizontally
+                        if new_x < margin {
+                            new_x = width - margin - 1.0;
+                        } else if new_x > width - margin {
+                            new_x = margin + 1.0;
+                        }
+                        
+                        // Wrap vertically
+                        if new_y < margin {
+                            new_y = height - margin - 1.0;
+                        } else if new_y > height - margin {
+                            new_y = margin + 1.0;
+                        }
+                        
+                        // If we wrapped, set cursor position and update tracking
+                        if new_x != position.x || new_y != position.y {
+                            let _ = window.set_cursor_position(
+                                winit::dpi::PhysicalPosition::new(new_x, new_y)
+                            );
+                            self.mouse_position = Some((new_x, new_y));
+                            self.mouse_prev_position = Some((new_x, new_y));
+                        }
                     }
                 }
             }

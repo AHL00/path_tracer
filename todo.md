@@ -3,4 +3,4 @@
 [ ] Stop rebuilding entire AS on every frame
 [ ] Proper lighting
 [x] Accumulation on separate buffer so that it isn't affected by swapchain
-[ ] GLTF textures stretched, check sponza and cafe
+[x] GLTF textures stretched, check sponza and cafe

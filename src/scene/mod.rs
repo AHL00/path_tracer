@@ -1,20 +1,17 @@
 use std::{collections::HashMap, sync::Arc};
 
 use vulkano::{
-    buffer::{Buffer, BufferCreateFlags, BufferCreateInfo, BufferUsage, Subbuffer},
+    buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferInfo, PrimaryCommandBufferAbstract,
     },
-    descriptor_set::{CopyDescriptorSet, DescriptorSet, WriteDescriptorSet},
+    descriptor_set::{DescriptorSet, WriteDescriptorSet},
     device::DeviceOwnedVulkanObject,
     memory::allocator::{AllocationCreateInfo, MemoryTypeFilter},
     sync::GpuFuture,
 };
 
-use crate::{
-    graphics::VulkanContext,
-    renderer::{Renderer, shaders},
-};
+use crate::{graphics::VulkanContext, renderer::shaders};
 
 pub mod geometry;
 pub mod gltf;

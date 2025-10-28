@@ -16,6 +16,7 @@ impl super::Scene {
         path: &std::path::Path,
         context: &VulkanContext,
         position_offset: glam::Vec3,
+        scale: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let (document, buffers, images) = gltf::import(path)?;
 
@@ -34,11 +35,12 @@ impl super::Scene {
                 if let Some(mesh) = node.mesh() {
                     let mut transform = Transform::default();
 
-                    let (position, rotation, scale) = node.transform().decomposed();
+                    let (position, rotation, node_scale) = node.transform().decomposed();
 
                     transform.position = glam::Vec3::from(position) + position_offset;
                     transform.rotation = glam::Quat::from_array(rotation);
-                    transform.scale = glam::Vec3::from(scale);
+                    // Apply node scale multiplied by the global scale factor
+                    transform.scale = glam::Vec3::from(node_scale) * scale;
 
                     for primitive in mesh.primitives() {
                         let gltf_mat = primitive.material();

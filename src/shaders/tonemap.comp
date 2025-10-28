@@ -4,6 +4,16 @@ layout (local_size_x = 8, local_size_y = 8) in;
 layout (rgba32f, set = 0, binding = 0) uniform image2D hdr_image;
 layout (rgba8, set = 0, binding = 1) writeonly uniform image2D ldr_image;
 
+layout(push_constant) uniform PushConstants {
+    uint tonemapping_mode; // 0 = Linear, 1 = Reinhard, 2 = ACES, 3 = Filmic
+    float exposure;
+} push_constants;
+
+// Linear tone mapping (no tone mapping)
+vec3 tonemap_linear(vec3 hdr_color) {
+    return clamp(hdr_color, 0.0f, 1.0f);
+}
+
 // Reinhard tone mapping with exposure control
 vec3 tonemap_reinhard(vec3 hdr_color, float exposure) {
     vec3 mapped = hdr_color * exposure;
@@ -21,6 +31,22 @@ vec3 tonemap_aces(vec3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0f, 1.0f);
 }
 
+// Filmic tone mapping
+vec3 tonemap_filmic(vec3 x) {
+    const float A = 0.15;
+    const float B = 0.50;
+    const float C = 0.10;
+    const float D = 0.20;
+    const float E = 0.02;
+    const float F = 0.30;
+    const float W = 11.2;
+
+    x = ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
+    float white = ((W * (A * W + C * B) + D * E) / (W * (A * W + B) + D * F)) - E / F;
+    
+    return clamp(x / white, 0.0f, 1.0f);
+}
+
 void main() {
     ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
     
@@ -32,10 +58,23 @@ void main() {
     // Load HDR color
     vec4 hdr_color = imageLoad(hdr_image, pixel_coords);
     
-    // Apply tone mapping with exposure adjustment
-    // Exposure controls overall brightness (2.0 = normal, higher = brighter)
-    float exposure = 2.0f;
-    vec3 ldr_color = tonemap_aces(hdr_color.rgb * exposure);
+    // Apply selected tone mapping
+    vec3 ldr_color;
+    float exposure = push_constants.exposure;
+    
+    if (push_constants.tonemapping_mode == 0u) {
+        // Linear
+        ldr_color = tonemap_linear(hdr_color.rgb * exposure);
+    } else if (push_constants.tonemapping_mode == 1u) {
+        // Reinhard
+        ldr_color = tonemap_reinhard(hdr_color.rgb, exposure);
+    } else if (push_constants.tonemapping_mode == 2u) {
+        // ACES
+        ldr_color = tonemap_aces(hdr_color.rgb * exposure);
+    } else {
+        // Filmic (mode 3)
+        ldr_color = tonemap_filmic(hdr_color.rgb * exposure);
+    }
     
     // Gamma correction (sRGB)
     ldr_color = pow(ldr_color, vec3(1.0f / 2.2f));

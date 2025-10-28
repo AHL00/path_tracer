@@ -19,6 +19,7 @@ use winit::{
 };
 
 use crate::{PARENT_CHILD_GAP, render_window::RenderApp};
+use path_tracer::renderer::TonemappingMode;
 
 pub struct ConfigApp {
     pub window: Option<Arc<winit::window::Window>>,
@@ -183,6 +184,103 @@ impl ConfigApp {
                 let mut test = 0;
                 ui.add(egui::DragValue::new(&mut test).range(1..=1000));
             });
+
+            ui.separator();
+
+            ui.label("Tonemapping Settings");
+
+            if let Some(renderer) = &mut render_app.renderer {
+                let mut current_mode = renderer.tonemapping_mode;
+                
+                ui.horizontal(|ui| {
+                    ui.label("Tonemapping Mode:");
+                    egui::ComboBox::from_id_salt("TonemappingModeDropdown")
+                        .selected_text(current_mode.as_str())
+                        .show_ui(ui, |ui| {
+                            for mode in TonemappingMode::iter() {
+                                ui.selectable_value(&mut current_mode, mode, mode.as_str());
+                            }
+                        });
+                });
+
+                if current_mode != renderer.tonemapping_mode {
+                    renderer.tonemapping_mode = current_mode;
+                    // Reset accumulation when changing tonemapping mode
+                    renderer.accumulated_count = 0;
+                }
+            }
+
+            ui.separator();
+
+            ui.label("Camera Settings");
+
+            if let Some(renderer) = &mut render_app.renderer {
+                ui.horizontal(|ui| {
+                    ui.label("Mouse Sensitivity:");
+                    ui.add(egui::Slider::new(&mut renderer.mouse_sensitivity, 0.1..=2.0));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Movement Speed:");
+                    ui.add(egui::Slider::new(&mut renderer.movement_speed, 0.5..=50.0));
+                });
+            }
+
+            ui.separator();
+
+            ui.label("HDRI Settings");
+
+            if let Some(renderer) = &mut render_app.renderer {
+                ui.horizontal(|ui| {
+                    if ui.button("Load HDRI").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("HDRI images", &["hdr", "exr"])
+                            .pick_file()
+                        {
+                            match renderer.load_hdri(&render_app.context.as_ref().unwrap(), &path) {
+                                Ok(_) => {
+                                    log::info!("Successfully loaded HDRI from {:?}", path);
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to load HDRI: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    if renderer.hdri_texture.is_some() && ui.button("Unload HDRI").clicked() {
+                        renderer.unload_hdri();
+                    }
+                });
+
+                if renderer.hdri_texture.is_some() {
+                    let mut prev_enabled = renderer.hdri_enabled;
+                    ui.checkbox(&mut renderer.hdri_enabled, "Enable HDRI");
+                    
+                    // Reset accumulation when toggling HDRI
+                    if renderer.hdri_enabled != prev_enabled {
+                        renderer.accumulated_count = 0;
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.label("HDRI Rotation:");
+                        let mut prev_rotation = renderer.hdri_rotation;
+                        ui.add(egui::Slider::new(&mut renderer.hdri_rotation, 0.0..=360.0));
+                        if (renderer.hdri_rotation - prev_rotation).abs() > 0.01 {
+                            renderer.accumulated_count = 0;
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("HDRI Intensity:");
+                        let mut prev_intensity = renderer.hdri_intensity;
+                        ui.add(egui::Slider::new(&mut renderer.hdri_intensity, 0.1..=5.0));
+                        if (renderer.hdri_intensity - prev_intensity).abs() > 0.001 {
+                            renderer.accumulated_count = 0;
+                        }
+                    });
+                }
+            }
 
             ui.separator();
 

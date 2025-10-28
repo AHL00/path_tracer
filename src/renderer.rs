@@ -28,8 +28,8 @@ use vulkano::{
     },
     format::Format,
     image::{
-        Image, ImageCreateInfo, ImageLayout, ImageSubresourceLayers, ImageUsage, ImageAspects,
-        sampler::{self, Sampler, Filter},
+        Image, ImageCreateInfo, ImageSubresourceLayers, ImageUsage, ImageAspects,
+        sampler::{Sampler, Filter},
         view::ImageView,
     },
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
@@ -136,6 +136,44 @@ pub struct PushConstantRequirements {
     raygen: PushConstantRange,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TonemappingMode {
+    Linear,      // No tonemapping, linear output
+    Reinhard,    // Reinhard tonemapping
+    ACES,        // ACES tonemapping
+    Filmic,      // Filmic tonemapping
+}
+
+impl TonemappingMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TonemappingMode::Linear => "Linear",
+            TonemappingMode::Reinhard => "Reinhard",
+            TonemappingMode::ACES => "ACES",
+            TonemappingMode::Filmic => "Filmic",
+        }
+    }
+
+    pub fn as_u32(&self) -> u32 {
+        match self {
+            TonemappingMode::Linear => 0,
+            TonemappingMode::Reinhard => 1,
+            TonemappingMode::ACES => 2,
+            TonemappingMode::Filmic => 3,
+        }
+    }
+
+    pub fn iter() -> impl Iterator<Item = TonemappingMode> {
+        vec![
+            TonemappingMode::Linear,
+            TonemappingMode::Reinhard,
+            TonemappingMode::ACES,
+            TonemappingMode::Filmic,
+        ]
+        .into_iter()
+    }
+}
+
 pub struct Renderer {
     pub rgen_descriptor_set: Arc<DescriptorSet>,
 
@@ -176,6 +214,16 @@ pub struct Renderer {
 
     pub camera: crate::camera::Camera,
     pub samples_per_pixel: u32,
+    pub tonemapping_mode: TonemappingMode,
+    pub mouse_sensitivity: f32,
+    pub movement_speed: f32,
+
+    // HDRI
+    pub hdri_texture: Option<crate::hdri::HdriTexture>,
+    pub hdri_rotation: f32,      // in degrees (0-360)
+    pub hdri_intensity: f32,     // multiplier for brightness
+    pub hdri_enabled: bool,
+    pub hdri_descriptor_set: Option<Arc<DescriptorSet>>,
 
     pub prev_cam_state: crate::camera::Camera,
     pub resized_dirty: bool,
@@ -361,6 +409,25 @@ impl Renderer {
                         },
                     )
                     .unwrap(),
+                    // HDRI texture descriptor set (set 4)
+                    DescriptorSetLayout::new(
+                        context.device.clone(),
+                        DescriptorSetLayoutCreateInfo {
+                            bindings: [(
+                                0,
+                                DescriptorSetLayoutBinding {
+                                    stages: ShaderStages::MISS,
+                                    ..DescriptorSetLayoutBinding::descriptor_type(
+                                        DescriptorType::CombinedImageSampler,
+                                    )
+                                },
+                            )]
+                            .into_iter()
+                            .collect(),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap(),
                 ],
                 push_constant_ranges: vec![
                     push_constant_requirements.closest_hit,
@@ -541,6 +608,11 @@ impl Renderer {
             context.device.clone(),
             PipelineLayoutCreateInfo {
                 set_layouts: vec![tonemap_descriptor_set_layout.clone()],
+                push_constant_ranges: vec![PushConstantRange {
+                    stages: ShaderStages::COMPUTE,
+                    offset: 0,
+                    size: 8, // uint (4 bytes) + float (4 bytes)
+                }],
                 ..Default::default()
             },
         )
@@ -599,7 +671,17 @@ impl Renderer {
             scene,
 
             samples_per_pixel: 1,
+            tonemapping_mode: TonemappingMode::ACES,
+            mouse_sensitivity: 1.0,
+            movement_speed: 3.0,
             camera: Camera::default(),
+
+            // HDRI
+            hdri_texture: None,
+            hdri_rotation: 0.0,
+            hdri_intensity: 1.0,
+            hdri_enabled: false,
+            hdri_descriptor_set: None,
 
             prev_cam_state: Camera::default(),
             resized_dirty: false,
@@ -704,6 +786,39 @@ impl Renderer {
         }
 
         self.resized_dirty = true;
+    }
+
+    pub fn load_hdri(
+        &mut self,
+        context: &crate::graphics::VulkanContext,
+        path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let hdri = crate::hdri::HdriTexture::load(context, path)?;
+        
+        // Create descriptor set for HDRI texture (set 4)
+        let hdri_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            self.pipeline_layout.set_layouts().get(4).unwrap().clone(),
+            [WriteDescriptorSet::image_view_sampler(
+                0,
+                hdri.view.clone(),
+                hdri.sampler.clone(),
+            )],
+            [],
+        )?;
+        
+        self.hdri_texture = Some(hdri);
+        self.hdri_descriptor_set = Some(hdri_descriptor_set);
+        self.hdri_enabled = true;
+        self.accumulated_count = 0; // Reset accumulation when changing environment
+        
+        Ok(())
+    }
+
+    pub fn unload_hdri(&mut self) {
+        self.hdri_texture = None;
+        self.hdri_enabled = false;
+        self.accumulated_count = 0;
     }
 
     pub fn save_render_texture_to_file(
@@ -975,7 +1090,7 @@ impl Renderer {
                 samples_per_pixel: self.samples_per_pixel,
                 seed: rand::random(),
                 accumulated_count: self.accumulated_count,
-                padding: [0; 1],
+                hdri_enabled: if self.hdri_enabled { 1 } else { 0 },
             },
             camera: shaders::raygen::Camera {
                 view_proj: (proj * view).to_cols_array_2d(),
@@ -989,7 +1104,7 @@ impl Renderer {
                 samples_per_pixel: self.samples_per_pixel,
                 seed: rand::random(),
                 accumulated_count: self.accumulated_count,
-                padding: [0; 1],
+                hdri_enabled: if self.hdri_enabled { 1 } else { 0 },
             },
         };
 
@@ -1012,17 +1127,28 @@ impl Renderer {
         // Update the descriptor set with the new TLAS
         self.update_descriptor_set(context);
 
+        let mut descriptor_sets = vec![
+            self.rgen_descriptor_set.clone(),
+            self.path_tracing_descriptor_set.clone(), // Render to path tracing buffer
+            self.scene.rhit_descriptor_set.clone(),
+            self.bindless_textures_descriptor_set.clone(),
+        ];
+        
+        // Add HDRI descriptor set if loaded
+        if let Some(hdri_ds) = &self.hdri_descriptor_set {
+            descriptor_sets.push(hdri_ds.clone());
+        } else {
+            // Bind empty descriptor set for set 4 if HDRI not loaded
+            // This prevents validation errors from missing sets
+            descriptor_sets.push(self.rgen_descriptor_set.clone()); // placeholder
+        }
+
         builder
             .bind_descriptor_sets(
                 PipelineBindPoint::RayTracing,
                 self.pipeline_layout.clone(),
                 0,
-                vec![
-                    self.rgen_descriptor_set.clone(),
-                    self.path_tracing_descriptor_set.clone(), // Render to path tracing buffer
-                    self.scene.rhit_descriptor_set.clone(),
-                    self.bindless_textures_descriptor_set.clone(),
-                ],
+                descriptor_sets,
             )
             .unwrap()
             .bind_pipeline_ray_tracing(self.pipeline.clone())
@@ -1043,6 +1169,16 @@ impl Renderer {
                 0,
                 self.tonemap_descriptor_set.clone(),
             )
+            .unwrap();
+
+        // Set tonemapping push constants
+        let tonemapping_mode = self.tonemapping_mode.as_u32();
+        let push_constants = shaders::tonemap::PushConstants {
+            tonemapping_mode,
+            exposure: 2.0,
+        };
+        builder
+            .push_constants(self.tonemap_pipeline.layout().clone(), 0, push_constants)
             .unwrap();
 
         // Dispatch tonemap compute shader
@@ -1066,7 +1202,7 @@ impl Renderer {
 
         let mut blit_image_info =
             BlitImageInfo::images(render_image_view.image().clone(), swapchain_image.clone());
-        
+
         // Set explicit regions for the blit
         blit_image_info.regions = smallvec::smallvec![ImageBlit {
             src_subresource: ImageSubresourceLayers {
@@ -1083,9 +1219,6 @@ impl Renderer {
             dst_offsets: [[0, 0, 0], [dst_extent[0], dst_extent[1], 1]],
             ..Default::default()
         }];
-        
-        // Use linear filtering for better quality when scalings
-        blit_image_info.filter = Filter::Linear;
 
         builder
             .blit_image(blit_image_info)

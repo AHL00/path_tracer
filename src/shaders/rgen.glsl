@@ -42,6 +42,7 @@ void main() {
     payload.done = 1;
     payload.origin = origin.xyz;
     payload.in_uv = in_uv;
+    payload.hdri_enabled = push_constants.uniforms.hdri_enabled;
 
     payload.direction = direction;
 

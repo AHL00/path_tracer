@@ -43,6 +43,7 @@ struct RayPayload {
     vec3 origin;
     vec3 direction;
     vec2 in_uv;
+    uint hdri_enabled;
 };
 
 struct RendererUniforms {
@@ -50,7 +51,7 @@ struct RendererUniforms {
     uint seed;
     // The number of frames already accumulated in the accumulation buffer
     uint accumulated_count;
-    uint padding[1];
+    uint hdri_enabled;
 };
 
 // float rand(vec2 uv, float depth, uint frame_seed) {
@@ -264,4 +265,37 @@ vec3 cosine_hemisphere_sample(vec2 uv, uint depth, uint accumulated_count, uint 
     // Create basis and transform local direction to world space
     mat3 basis = create_basis(normal);
     return basis * direction_local;
+}
+
+/// Convert world direction to spherical coordinates for HDRI lookup
+/// Returns UV coordinates in [0,1] range for latitude-longitude map
+vec2 world_to_hdri_uv(vec3 direction) {
+    // Normalize the direction
+    direction = normalize(direction);
+    
+    // Convert to spherical coordinates
+    float phi = atan(direction.z, direction.x);      // Azimuth (-PI to PI)
+    float theta = acos(clamp(direction.y, -1.0, 1.0)); // Polar angle (0 to PI)
+    
+    // Convert to [0, 1] range
+    float u = (phi + 3.1415926535) / (2.0 * 3.1415926535); // Azimuth to [0, 1]
+    float v = theta / 3.1415926535;                         // Polar to [0, 1]
+    
+    return vec2(u, v);
+}
+
+/// Apply rotation to world direction for HDRI
+vec3 rotate_direction(vec3 direction, float rotation_degrees) {
+    float angle = rotation_degrees * 3.1415926535 / 180.0;
+    float cos_a = cos(angle);
+    float sin_a = sin(angle);
+    
+    // Rotate around Y-axis (up vector)
+    mat3 rotation_matrix = mat3(
+        cos_a, 0.0, sin_a,
+        0.0,   1.0, 0.0,
+        -sin_a, 0.0, cos_a
+    );
+    
+    return rotation_matrix * direction;
 }

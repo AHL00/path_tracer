@@ -19,7 +19,7 @@ use vulkano::{
     format::Format,
     image::{
         Image, ImageCreateFlags, ImageCreateInfo, ImageFormatInfo, ImageType, ImageUsage,
-        sampler::{Sampler, SamplerAddressMode, SamplerCreateInfo},
+        sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo, SamplerMipmapMode},
         view::ImageView,
     },
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
@@ -302,12 +302,12 @@ impl VulkanContext {
 
         let window_aspect = size.width as f32 / size.height as f32;
         if (window_aspect - render_aspect).abs() > 0.01 {
-            let size_delta = [
-                size.width as i32 - self.swapchain.image_extent()[0] as i32,
-                size.height as i32 - self.swapchain.image_extent()[1] as i32,
-            ];
+            // let size_delta = [
+            //     size.width as i32 - self.swapchain.image_extent()[0] as i32,
+            //     size.height as i32 - self.swapchain.image_extent()[1] as i32,
+            // ];
 
-            log::debug!("Swapchain size delta: {}x{}", size_delta[0], size_delta[1]);
+            // log::debug!("Swapchain size delta: {}x{}", size_delta[0], size_delta[1]);
 
             let current_width = self.swapchain.image_extent()[0] as f32;
             let current_height = self.swapchain.image_extent()[1] as f32;
@@ -334,8 +334,6 @@ impl VulkanContext {
             )) {
                 // log::error!("Failed to resize window to match aspect ratio");
             }
-
-
 
             return Ok(());
         }
@@ -445,16 +443,65 @@ impl Texture {
 
         let image_view = ImageView::new_default(image.clone()).unwrap();
 
+        // Map glTF sampler to Vulkan sampler
         let mag = sampler.mag_filter();
         let min = sampler.min_filter();
         let address_mode_u = sampler.wrap_s();
         let address_mode_v = sampler.wrap_t();
 
-        // TODO
+        fn map_wrap_mode(mode: gltf::texture::WrappingMode) -> SamplerAddressMode {
+            match mode {
+                gltf::texture::WrappingMode::ClampToEdge => SamplerAddressMode::ClampToEdge,
+                gltf::texture::WrappingMode::MirroredRepeat => SamplerAddressMode::MirroredRepeat,
+                gltf::texture::WrappingMode::Repeat => SamplerAddressMode::Repeat,
+            }
+        }
+
+        fn map_mag_filter(f: Option<gltf::texture::MagFilter>) -> Filter {
+            match f {
+                Some(gltf::texture::MagFilter::Nearest) => Filter::Nearest,
+                Some(gltf::texture::MagFilter::Linear) | None => Filter::Linear,
+            }
+        }
+
+        fn map_min_filter(f: Option<gltf::texture::MinFilter>) -> (Filter, SamplerMipmapMode) {
+            match f {
+                Some(gltf::texture::MinFilter::Nearest) => {
+                    (Filter::Nearest, SamplerMipmapMode::Nearest)
+                }
+                Some(gltf::texture::MinFilter::Linear) => {
+                    (Filter::Linear, SamplerMipmapMode::Nearest)
+                }
+                Some(gltf::texture::MinFilter::NearestMipmapNearest) => {
+                    (Filter::Nearest, SamplerMipmapMode::Nearest)
+                }
+                Some(gltf::texture::MinFilter::LinearMipmapNearest) => {
+                    (Filter::Linear, SamplerMipmapMode::Nearest)
+                }
+                Some(gltf::texture::MinFilter::NearestMipmapLinear) => {
+                    (Filter::Nearest, SamplerMipmapMode::Linear)
+                }
+                Some(gltf::texture::MinFilter::LinearMipmapLinear) => {
+                    (Filter::Linear, SamplerMipmapMode::Linear)
+                }
+                None => (Filter::Linear, SamplerMipmapMode::Linear),
+            }
+        }
+
+        let mag_filter = map_mag_filter(mag);
+        let (min_filter, mipmap_mode) = map_min_filter(min);
 
         let sampler = Sampler::new(
             context.device.clone(),
             SamplerCreateInfo {
+                mag_filter,
+                min_filter,
+                mipmap_mode,
+                address_mode: [
+                    map_wrap_mode(address_mode_u),
+                    map_wrap_mode(address_mode_v),
+                    SamplerAddressMode::ClampToEdge,
+                ],
                 ..Default::default()
             },
         )

@@ -69,6 +69,9 @@ pub struct RenderApp {
 
     _parent_window: Option<Arc<Window>>,
     _queue_recreate_swapchain: bool,
+    
+    // Input state for camera
+    keys_pressed: [bool; 8], // W, S, A, D, Space, C, Left, Right
 }
 
 impl RenderApp {
@@ -80,6 +83,7 @@ impl RenderApp {
 
             _parent_window: None,
             _queue_recreate_swapchain: false,
+            keys_pressed: [false; 8],
         }
     }
 
@@ -90,6 +94,47 @@ impl RenderApp {
 
     pub fn redraw(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         self.stats.update_frame_start();
+
+        // Update camera based on pressed keys with smooth delta_time movement
+        let delta_time = self.stats.last_second_delta_time.as_secs_f32();
+        let movement_speed = 5.0; // units per second
+        let rotation_speed = 2.0; // radians per second
+        
+        if let Some(renderer) = &mut self.renderer {
+            let forward = renderer.camera.transform.forward();
+            let right = renderer.camera.transform.right();
+            let up = renderer.camera.transform.up();
+            
+            // Position movement
+            if self.keys_pressed[0] { // W
+                renderer.camera.transform.position += movement_speed * delta_time * forward;
+            }
+            if self.keys_pressed[1] { // S
+                renderer.camera.transform.position -= movement_speed * delta_time * forward;
+            }
+            if self.keys_pressed[2] { // A
+                renderer.camera.transform.position -= movement_speed * delta_time * right;
+            }
+            if self.keys_pressed[3] { // D
+                renderer.camera.transform.position += movement_speed * delta_time * right;
+            }
+            if self.keys_pressed[4] { // Space
+                renderer.camera.transform.position += movement_speed * delta_time * up;
+            }
+            if self.keys_pressed[5] { // C
+                renderer.camera.transform.position -= movement_speed * delta_time * up;
+            }
+            
+            // Rotation movement
+            if self.keys_pressed[6] { // Left Arrow
+                renderer.camera.transform.rotation *=
+                    glam::Quat::from_rotation_y(rotation_speed * delta_time);
+            }
+            if self.keys_pressed[7] { // Right Arrow
+                renderer.camera.transform.rotation *=
+                    glam::Quat::from_rotation_y(-rotation_speed * delta_time);
+            }
+        }
 
         let context = self.context.as_mut().unwrap();
         let renderer = self.renderer.as_mut().unwrap();
@@ -329,62 +374,39 @@ impl ApplicationHandler for RenderApp {
                 panic!("This is supposed to be handled in main.rs");
             }
             WindowEvent::KeyboardInput {
-                device_id,
                 event,
-                is_synthetic,
+                ..
             } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    let is_pressed = event.state == winit::event::ElementState::Pressed;
+                    
                     match code {
                         KeyCode::Escape => {
                             event_loop.exit();
                         }
                         KeyCode::KeyW => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position +=
-                                    0.1 * renderer.camera.transform.forward();
-                            }
+                            self.keys_pressed[0] = is_pressed;
                         }
                         KeyCode::KeyS => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position -=
-                                    0.1 * renderer.camera.transform.forward();
-                            }
+                            self.keys_pressed[1] = is_pressed;
                         }
                         KeyCode::KeyA => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position -=
-                                    0.1 * renderer.camera.transform.right();
-                            }
+                            self.keys_pressed[2] = is_pressed;
                         }
                         KeyCode::KeyD => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position +=
-                                    0.1 * renderer.camera.transform.right();
-                            }
+                            self.keys_pressed[3] = is_pressed;
                         }
                         KeyCode::Space => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position +=
-                                    0.1 * renderer.camera.transform.up();
-                            }
+                            self.keys_pressed[4] = is_pressed;
                         }
                         KeyCode::KeyC => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.position -=
-                                    0.1 * renderer.camera.transform.up();
-                            }
+                            self.keys_pressed[5] = is_pressed;
                         }
                         KeyCode::ArrowLeft => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.rotation *=
-                                    glam::Quat::from_rotation_y(0.1);
-                            }
+                            self.keys_pressed[6] = is_pressed;
                         }
                         KeyCode::ArrowRight => {
-                            if let Some(renderer) = &mut self.renderer {
-                                renderer.camera.transform.rotation *=
-                                    glam::Quat::from_rotation_y(-0.1);
-                            }
+                            self.keys_pressed[7] = is_pressed;
                         }
                         _ => {}
                     }

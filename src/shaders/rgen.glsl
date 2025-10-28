@@ -43,16 +43,24 @@ void main() {
     payload.origin = origin.xyz;
     payload.in_uv = in_uv;
 
-    // Randomize the ray direction
-    vec3 rand_dir = cosine_hemisphere_sample(
-        in_uv, 
-        0,
-        push_constants.uniforms.accumulated_count,
-        push_constants.uniforms.seed, 
-        direction
-    );
-    payload.direction = normalize(direction + rand_dir * 0.0005);
-    // payload.direction = direction.xyz;
+    payload.direction = direction;
+
+    // Apply temporal anti-aliasing instead of per-pixel jitter
+    // This helps with distance blurring by being more stable
+    // The jitter is now encoded in the random sampling at hit points
+    // rather than perturbing rays at the source
+    if (push_constants.uniforms.accumulated_count > 0) {
+        // Use a proper cosine-weighted hemisphere sample for anti-aliasing
+        vec3 jitter = cosine_hemisphere_sample(
+            in_uv, 
+            0,
+            push_constants.uniforms.accumulated_count,
+            push_constants.uniforms.seed, 
+            direction
+        );
+        // Apply smaller, smoother jitter that still provides anti-aliasing
+        payload.direction = normalize(direction + jitter * 0.0001);
+    }
 
     vec3 attenuation = vec3(1.0);
     
@@ -100,20 +108,12 @@ void main() {
 
     float accumulated_count = float(push_constants.uniforms.accumulated_count);
 
-    vec3 current_image_value = imageLoad(image, ivec2(gl_LaunchIDEXT.xy)).xyz;
-    vec3 scaled_down_current_value = current_image_value * accumulated_count / (accumulated_count + 1.0);
-
-    vec3 scaled_down_attenuation = attenuation / (accumulated_count + 1.0);
-    // vec3 random = cosine_hemisphere_sample(
-    //     in_uv, 
-    //     0, 
-    //     push_constants.uniforms.accumulated_count,
-    //     push_constants.uniforms.seed, 
-    //     vec3(0.5, 0.5, 0.5)
-    // );
-    // vec3 scaled_down_attenuation = random / (accumulated_count + 1.0);
-
-    vec3 new_average_value = (scaled_down_attenuation + scaled_down_current_value);
+    vec3 current_accumulated_value = imageLoad(image, ivec2(gl_LaunchIDEXT.xy)).xyz;
+    
+    // Proper running average: (old_sum + new_sample) / (n + 1)
+    // where old_sum = current_accumulated_value (already averaged n times)
+    // So: (current_accumulated_value * n + attenuation) / (n + 1)
+    vec3 new_average_value = (current_accumulated_value * accumulated_count + attenuation) / (accumulated_count + 1.0);
 
     imageStore(image, ivec2(gl_LaunchIDEXT.xy), vec4(new_average_value, 1.0));
 

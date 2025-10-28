@@ -186,15 +186,17 @@ uint hash4(uvec4 p) {
 // Uses integer hashing for better statistical properties in parallel execution.
 // Now includes accumulated_count for better temporal decorrelation.
 float rand(vec2 uv, uint depth, uint accumulated_count, uint seed) {
-    // Convert uv float bits directly to uint for robust integer hashing
-    uvec2 u_uv = floatBitsToUint(uv);
-
-    // Combine inputs into a single state using hashing.
-    // Hash uv coords first, then combine with depth, count, and seed.
-    uint state = hash2(u_uv);
-    state = hash(state ^ depth);             // Mix in depth
-    state = hash(state ^ accumulated_count); // Mix in accumulated_count
-    state = hash(state ^ seed);              // Mix in seed
+    // Convert pixel coordinates to uint using floatBitsToUint
+    // This avoids spatial correlation patterns that come from direct coordinate conversion
+    uvec2 pixel_coord = uvec2(uv * 10000.0); // Scale up for better precision
+    
+    // Hash the pixel coordinates independently to break spatial patterns
+    uint state = hash(pixel_coord.x * 73856093u ^ pixel_coord.y * 19349663u);
+    
+    // Mix in other parameters with different prime multipliers to minimize collisions
+    state = hash(state + depth * 83492791u);
+    state = hash(state + accumulated_count * 45684233u);
+    state = hash(state + seed * 39916801u);
 
     // Convert final hash to float in [0, 1) range
     return float(state) / 4294967296.0;

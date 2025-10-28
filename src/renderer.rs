@@ -17,7 +17,7 @@ use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyImageToBufferInfo,
-        PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract,
+        PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, ImageBlit,
     },
     descriptor_set::{
         DescriptorSet, WriteDescriptorSet,
@@ -28,19 +28,20 @@ use vulkano::{
     },
     format::Format,
     image::{
-        Image, ImageCreateInfo, ImageLayout, ImageSubresourceLayers, ImageUsage,
-        sampler::{self, Sampler},
+        Image, ImageCreateInfo, ImageLayout, ImageSubresourceLayers, ImageUsage, ImageAspects,
+        sampler::{self, Sampler, Filter},
         view::ImageView,
     },
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
-        PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
+        PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo, Pipeline,
         graphics::vertex_input::Vertex,
         layout::{PipelineLayoutCreateInfo, PushConstantRange},
         ray_tracing::{
             RayTracingPipeline, RayTracingPipelineCreateInfo, RayTracingShaderGroupCreateInfo,
             ShaderBindingTable,
         },
+        compute::{ComputePipeline, ComputePipelineCreateInfo},
     },
     shader::ShaderStages,
     sync::GpuFuture,
@@ -76,6 +77,14 @@ pub mod shaders {
         vulkano_shaders::shader! {
             ty: "closesthit",
             path: "src/shaders/rchit.glsl",
+            vulkan_version: "1.3",
+        }
+    }
+
+    pub(super) mod tonemap {
+        vulkano_shaders::shader! {
+            ty: "compute",
+            path: "src/shaders/tonemap.comp",
             vulkan_version: "1.3",
         }
     }
@@ -135,9 +144,18 @@ pub struct Renderer {
     pub shader_binding_table: ShaderBindingTable,
     pub push_constant_requirements: PushConstantRequirements,
 
+    // Path tracing buffer - where ray tracing actually renders to
+    pub path_tracing_texture: Arc<ImageView>,
+    pub path_tracing_descriptor_set: Arc<DescriptorSet>,
+    
+    // Display buffer - for compatibility and potential future use
     pub render_texture: Arc<ImageView>,
     render_resolution: [u32; 2],
     pub render_texture_descriptor_set: Arc<DescriptorSet>,
+
+    // Tonemapping compute pipeline
+    pub tonemap_pipeline: Arc<ComputePipeline>,
+    pub tonemap_descriptor_set: Arc<DescriptorSet>,
 
     pub tlas: Arc<AccelerationStructure>,
 
@@ -438,14 +456,40 @@ impl Renderer {
         )
         .unwrap();
 
+        // Create the path tracing texture (where ray tracing renders to)
+        let path_tracing_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: Format::R32G32B32A32_SFLOAT, // HDR format for path tracing
+                    extent: [render_resolution[0], render_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let path_tracing_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            pipeline_layout.set_layouts()[1].clone(),
+            [WriteDescriptorSet::image_view(0, path_tracing_texture.clone())],
+            [],
+        )
+        .unwrap();
+
         // Recreate the render texture and its descriptor set
+        // Use R8G8B8A8_UNORM for tonemap output (matches shader rgba8 format)
+        // This will be blitted to the swapchain format
         let render_texture = ImageView::new_default(
             Image::new(
                 context.memory_allocator.clone(),
                 ImageCreateInfo {
-                    format: context.swapchain.image_format(),
+                    format: Format::R8G8B8A8_UNORM,
                     extent: [render_resolution[0], render_resolution[1], 1].into(),
-                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
                     ..Default::default()
                 },
                 AllocationCreateInfo::default(),
@@ -462,16 +506,88 @@ impl Renderer {
         )
         .unwrap();
 
+        // Create tonemap compute pipeline
+        let tonemap_descriptor_set_layout = DescriptorSetLayout::new(
+            context.device.clone(),
+            DescriptorSetLayoutCreateInfo {
+                bindings: [
+                    (
+                        0,
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::COMPUTE,
+                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                DescriptorType::StorageImage,
+                            )
+                        },
+                    ),
+                    (
+                        1,
+                        DescriptorSetLayoutBinding {
+                            stages: ShaderStages::COMPUTE,
+                            ..DescriptorSetLayoutBinding::descriptor_type(
+                                DescriptorType::StorageImage,
+                            )
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let tonemap_pipeline_layout = PipelineLayout::new(
+            context.device.clone(),
+            PipelineLayoutCreateInfo {
+                set_layouts: vec![tonemap_descriptor_set_layout.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let tonemap_shader = shaders::tonemap::load(context.device.clone())
+            .unwrap()
+            .entry_point("main")
+            .unwrap();
+
+        let tonemap_pipeline = ComputePipeline::new(
+            context.device.clone(),
+            None,
+            ComputePipelineCreateInfo::stage_layout(
+                PipelineShaderStageCreateInfo::new(tonemap_shader),
+                tonemap_pipeline_layout.clone(),
+            ),
+        )
+        .unwrap();
+
+        let tonemap_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            tonemap_descriptor_set_layout,
+            [
+                WriteDescriptorSet::image_view(0, path_tracing_texture.clone()),
+                WriteDescriptorSet::image_view(1, render_texture.clone()),
+            ],
+            [],
+        )
+        .unwrap();
+
         let mut res = Self {
             pipeline_layout,
             pipeline,
             rgen_descriptor_set,
             push_constant_requirements,
 
+            path_tracing_texture,
+            path_tracing_descriptor_set,
+
             render_texture,
             render_resolution,
             // TODO: Configurable?
             render_texture_descriptor_set,
+
+            tonemap_pipeline,
+            tonemap_descriptor_set,
 
             shader_binding_table,
             bindless_textures_descriptor_set,
@@ -505,14 +621,39 @@ impl Renderer {
         context: &crate::graphics::VulkanContext,
         new_resolution: [u32; 2],
     ) {
-        // Recreate the render texture and its descriptor set
+        // Recreate the path tracing texture (HDR)
+        self.path_tracing_texture = ImageView::new_default(
+            Image::new(
+                context.memory_allocator.clone(),
+                ImageCreateInfo {
+                    format: Format::R32G32B32A32_SFLOAT, // HDR format for path tracing
+                    extent: [new_resolution[0], new_resolution[1], 1].into(),
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+                    ..Default::default()
+                },
+                AllocationCreateInfo::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Recreate the path tracing descriptor set
+        self.path_tracing_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            self.pipeline_layout.set_layouts()[1].clone(),
+            [WriteDescriptorSet::image_view(0, self.path_tracing_texture.clone())],
+            [],
+        )
+        .unwrap();
+
+        // Recreate the render texture (LDR output from tonemap)
         self.render_texture = ImageView::new_default(
             Image::new(
                 context.memory_allocator.clone(),
                 ImageCreateInfo {
-                    format: context.swapchain.image_format(),
+                    format: Format::R8G8B8A8_UNORM,
                     extent: [new_resolution[0], new_resolution[1], 1].into(),
-                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
                     ..Default::default()
                 },
                 AllocationCreateInfo::default(),
@@ -534,14 +675,25 @@ impl Renderer {
         )
         .unwrap();
 
-        // Resize window to match the render aspect
-        // Resize handler will handle the swapchain resize
-        // For now, take the height of the window as the constant
-        // and calculate the width based on the render aspect
-        let render_aspect = self.render_resolution[0] as f32 / self.render_resolution[1] as f32;
+        // Update the tonemap descriptor set to use both new textures
+        self.tonemap_descriptor_set = DescriptorSet::new(
+            context.descriptor_set_allocator.clone(),
+            self.tonemap_pipeline.layout().set_layouts()[0].clone(),
+            [
+                WriteDescriptorSet::image_view(0, self.path_tracing_texture.clone()),
+                WriteDescriptorSet::image_view(1, self.render_texture.clone()),
+            ],
+            [],
+        )
+        .unwrap();
+
+        // Resize window to match the render aspect ratio
+        // Keep the window width constant and adjust height based on render resolution aspect ratio
+        // This prevents large resolutions from overflowing the screen
+        let render_aspect = new_resolution[0] as f32 / new_resolution[1] as f32;
         let window_size = context.winit.inner_size();
-        let height = window_size.height as f32;
-        let width = (height * render_aspect) as u32;
+        let width = window_size.width as f32;
+        let height = (width / render_aspect) as u32;
 
         let resize_res = context
             .winit
@@ -625,7 +777,8 @@ impl Renderer {
 
         let mut file = File::create(file_path)?;
 
-        image.unwrap()
+        image
+            .unwrap()
             .write_to(&mut file, format)
             .map_err(|e| format!("Failed to write image to file: {}", e))?;
 
@@ -866,7 +1019,7 @@ impl Renderer {
                 0,
                 vec![
                     self.rgen_descriptor_set.clone(),
-                    self.render_texture_descriptor_set.clone(),
+                    self.path_tracing_descriptor_set.clone(), // Render to path tracing buffer
                     self.scene.rhit_descriptor_set.clone(),
                     self.bindless_textures_descriptor_set.clone(),
                 ],
@@ -875,18 +1028,64 @@ impl Renderer {
             .bind_pipeline_ray_tracing(self.pipeline.clone())
             .unwrap();
 
-        let extent = self.render_texture.image().extent();
+        let extent = self.path_tracing_texture.image().extent();
 
         unsafe { builder.trace_rays(self.shader_binding_table.addresses().clone(), extent) }
             .expect("Failed to trace rays");
+
+        // Apply tonemapping: HDR path tracing texture -> LDR render texture
+        builder
+            .bind_pipeline_compute(self.tonemap_pipeline.clone())
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                self.tonemap_pipeline.layout().clone(),
+                0,
+                self.tonemap_descriptor_set.clone(),
+            )
+            .unwrap();
+
+        // Dispatch tonemap compute shader
+        // Workgroup size is 8x8 as defined in the shader
+        let workgroup_size = [8, 8];
+        let dispatch_x = (extent[0] + workgroup_size[0] - 1) / workgroup_size[0];
+        let dispatch_y = (extent[1] + workgroup_size[1] - 1) / workgroup_size[1];
+
+        unsafe {
+            builder.dispatch([dispatch_x, dispatch_y, 1]).unwrap();
+        }
 
         // Draw the render texture to the swapchain image
         // They are not guaranteed to be the same size, so we need to use a blit command
         let swapchain_image = context.swapchain_images[image_index as usize].clone();
         let render_image_view = self.render_texture.clone();
 
-        let blit_image_info =
+        // Get the extents of both images
+        let src_extent = render_image_view.image().extent();
+        let dst_extent = swapchain_image.extent();
+
+        let mut blit_image_info =
             BlitImageInfo::images(render_image_view.image().clone(), swapchain_image.clone());
+        
+        // Set explicit regions for the blit
+        blit_image_info.regions = smallvec::smallvec![ImageBlit {
+            src_subresource: ImageSubresourceLayers {
+                aspects: ImageAspects::COLOR,
+                mip_level: 0,
+                array_layers: 0..1,
+            },
+            src_offsets: [[0, 0, 0], [src_extent[0], src_extent[1], 1]],
+            dst_subresource: ImageSubresourceLayers {
+                aspects: ImageAspects::COLOR,
+                mip_level: 0,
+                array_layers: 0..1,
+            },
+            dst_offsets: [[0, 0, 0], [dst_extent[0], dst_extent[1], 1]],
+            ..Default::default()
+        }];
+        
+        // Use linear filtering for better quality when scalings
+        blit_image_info.filter = Filter::Linear;
 
         builder
             .blit_image(blit_image_info)

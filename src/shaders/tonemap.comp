@@ -1,0 +1,45 @@
+#version 460
+
+layout (local_size_x = 8, local_size_y = 8) in;
+layout (rgba32f, set = 0, binding = 0) uniform image2D hdr_image;
+layout (rgba8, set = 0, binding = 1) writeonly uniform image2D ldr_image;
+
+// Reinhard tone mapping with exposure control
+vec3 tonemap_reinhard(vec3 hdr_color, float exposure) {
+    vec3 mapped = hdr_color * exposure;
+    // Reinhard: x / (1 + x)
+    return mapped / (vec3(1.0f) + mapped);
+}
+
+// ACES tone mapping (more cinematic)
+vec3 tonemap_aces(vec3 x) {
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.14f;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0f, 1.0f);
+}
+
+void main() {
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+    
+    if (pixel_coords.x >= imageSize(hdr_image).x || 
+        pixel_coords.y >= imageSize(hdr_image).y) {
+        return;
+    }
+    
+    // Load HDR color
+    vec4 hdr_color = imageLoad(hdr_image, pixel_coords);
+    
+    // Apply tone mapping with exposure adjustment
+    // Exposure controls overall brightness (2.0 = normal, higher = brighter)
+    float exposure = 2.0f;
+    vec3 ldr_color = tonemap_aces(hdr_color.rgb * exposure);
+    
+    // Gamma correction (sRGB)
+    ldr_color = pow(ldr_color, vec3(1.0f / 2.2f));
+    
+    // Store LDR result
+    imageStore(ldr_image, pixel_coords, vec4(ldr_color, 1.0f));
+}

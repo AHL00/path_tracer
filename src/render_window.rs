@@ -361,35 +361,47 @@ impl ApplicationHandler for RenderApp {
         //     &mut renderer,
         //     std::path::Path::new("./assets/sponza/Sponza.gltf"),
         //     &self.context.as_ref().unwrap(),
-        //     Vec3::new(0.0, 0.0, 0.0),
-        //     2.0,
-        // )
-        // .unwrap();
-
-        // Scene::import_gltf(
-        //     &mut renderer,
-        //     std::path::Path::new("./assets/bistro/bistro.gltf"),
-        //     &self.context.as_ref().unwrap(),
-        //     Vec3::new(0.0, 0.0, 0.0),
-        // )
-        // .unwrap();
-
-        // Scene::import_gltf(
-        //     &mut renderer,
-        //     std::path::Path::new("./assets/cornell/cornell.gltf"),
-        //     &self.context.as_ref().unwrap(),
-        //     Vec3::new(0.0, 0.0, 0.0),
+        //     Vec3::new(50.0, 0.0, 0.0),
+        //     1.0,
         // )
         // .unwrap();
 
         Scene::import_gltf(
             &mut renderer,
-            std::path::Path::new("./assets/toy_car/ToyCar.gltf"),
+            std::path::Path::new("./assets/bistro/bistro.gltf"),
+            &self.context.as_ref().unwrap(),
+            Vec3::new(40.0, 0.0, 0.0),
+            1.0
+        )
+        .unwrap();
+
+        Scene::import_gltf(
+            &mut renderer,
+            std::path::Path::new("./assets/cornell/cornell.gltf"),
             &self.context.as_ref().unwrap(),
             Vec3::new(0.0, 0.0, 0.0),
+            1.0,
+        )
+        .unwrap();
+
+        Scene::import_gltf(
+            &mut renderer,
+            std::path::Path::new("./assets/toy_car/ToyCar.gltf"),
+            &self.context.as_ref().unwrap(),
+            Vec3::new(0.0, 0.0, 5.0),
             100.0,
         )
         .unwrap();
+
+        //     Scene::import_gltf(
+        //     &mut renderer,
+        //     std::path::Path::new("./assets/toy_car/ToyCar.gltf"),
+        //     &self.context.as_ref().unwrap(),
+        //     Vec3::new(50.0, 0.0, 0.0),
+        //     200.0,
+        // )
+        // .unwrap();
+
 
         Scene::import_gltf(
             &mut renderer,

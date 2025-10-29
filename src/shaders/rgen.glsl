@@ -111,6 +111,13 @@ void main() {
 
     vec3 current_accumulated_value = imageLoad(image, ivec2(gl_LaunchIDEXT.xy)).xyz;
     
+    // Debug mode: visualize bounce count
+    if (push_constants.uniforms.debug_mode == 4u) {
+        // Normalize depth to [0, 1] range with max at 16 bounces
+        float normalized_depth = float(payload.depth) / 16.0;
+        attenuation = vec3(normalized_depth);
+    }
+    
     // Proper running average: (old_sum + new_sample) / (n + 1)
     // where old_sum = current_accumulated_value (already averaged n times)
     // So: (current_accumulated_value * n + attenuation) / (n + 1)

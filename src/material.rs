@@ -1,13 +1,19 @@
-use std::sync::atomic::AtomicU64;
+use std::{
+    cell::LazyCell,
+    sync::{Arc, Mutex, OnceLock, Weak, atomic::AtomicU64},
+};
+
+use gltf::json::extensions::texture;
 
 use crate::{
     graphics::Texture,
-    renderer::{Renderer, shaders},
+    renderer::{Renderer, RendererID, shaders},
 };
 
 static MATERIAL_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A PBR material compatible with GLTF.
+/// Uses GGX/Trowbridge-Reitz BRDF for physically accurate rendering.
 /// Linked to a specific scene due to shared buffers.
 #[derive(Debug)]
 pub struct Material {
@@ -15,10 +21,30 @@ pub struct Material {
     _shared_buffer_index: u64,
 
     pub name: String,
+
+    // Base color
     pub base_color: glam::Vec4,
-    pub base_texture: Option<Texture>,
+    pub base_color_texture: Option<Arc<Texture>>,
+
+    // PBR Parameters
     pub metallic: f32,
     pub roughness: f32,
+
+    // PBR Textures
+    pub metallic_roughness_texture: Option<Arc<Texture>>,
+    pub normal_texture: Option<Arc<Texture>>,
+    pub emissive_texture: Option<Arc<Texture>>,
+    pub ao_texture: Option<Arc<Texture>>,
+
+    // Emissive
+    pub emissive_color: glam::Vec4,
+    pub emissive_strength: f32,
+
+    // IOR for dielectric materials (glass, plastic, etc.)
+    pub ior: f32,
+
+    // Material type: 0=Diffuse, 1=Metallic, 2=Glass/Dielectric
+    pub material_type: MaterialType,
 }
 
 impl PartialEq for Material {
@@ -27,9 +53,126 @@ impl PartialEq for Material {
     }
 }
 
-//TODO: Shared textures are likely loaded multiple times
-// Figure out a way to figure out whether a GLTF texture is already loaded and
-// retrieve it from the pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum MaterialType {
+    Diffuse = 0,
+    Metallic = 1,
+    Glass = 2,
+}
+
+// NOTE: Check shared.glsl for texture flag usage
+fn generate_texture_flags(
+    base_color_texture: &Option<Arc<Texture>>,
+    metallic_roughness_texture: &Option<Arc<Texture>>,
+    normal_texture: &Option<Arc<Texture>>,
+    emissive_texture: &Option<Arc<Texture>>,
+    ao_texture: &Option<Arc<Texture>>,
+) -> u32 {
+    let mut flags = 0;
+    if base_color_texture.is_some() {
+        flags |= 1 << 0;
+    }
+    if metallic_roughness_texture.is_some() {
+        flags |= 1 << 1;
+    }
+    if normal_texture.is_some() {
+        flags |= 1 << 2;
+    }
+    if emissive_texture.is_some() {
+        flags |= 1 << 3;
+    }
+    if ao_texture.is_some() {
+        flags |= 1 << 4;
+    }
+    flags
+}
+
+pub struct TextureWeakCache {
+    // Still store renderer id for validation even though it's hashed together with the data
+    by_hash: Mutex<std::collections::HashMap<u64, (Weak<Texture>, RendererID)>>,
+}
+
+impl TextureWeakCache {
+    pub fn new() -> Self {
+        Self {
+            by_hash: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub fn singleton() -> &'static TextureWeakCache {
+        static INSTANCE: OnceLock<TextureWeakCache> = OnceLock::new();
+        INSTANCE.get_or_init(TextureWeakCache::new)
+    }
+
+    pub fn get_or_load(
+        &self,
+        image_source: gltf::image::Source,
+        gltf_path: &std::path::Path,
+        buffers: &[gltf::buffer::Data],
+        sampler: gltf::texture::Sampler,
+        renderer: &mut Renderer,
+        context: &crate::graphics::VulkanContext,
+    ) -> Arc<Texture> {
+        let image_hash;
+        let mut data = None;
+
+        match &image_source {
+            gltf::image::Source::View { .. } => {
+                data = Some(
+                    gltf::image::Data::from_source(image_source.clone(), Some(gltf_path), buffers).unwrap(),
+                );
+                image_hash = xxhash_rust::xxh64::xxh64(&data.as_ref().unwrap().pixels, 0);
+            }
+            gltf::image::Source::Uri { uri, .. } => {
+                image_hash = xxhash_rust::xxh64::xxh64(uri.as_bytes(), 0);
+            }
+        }
+
+        // Combine renderer ID and image hash
+        let renderer_id = renderer.id();
+        let combined_hash = xxhash_rust::xxh64::xxh64(&renderer_id.to_le_bytes(), image_hash);
+
+        // log::debug!("Loading texture with hash {:x}", combined_hash);
+
+        // Check if we have a weak reference and if it's still valid
+        {
+            let cache = self.by_hash.lock().unwrap();
+            // log::info!("Cache: {:#x?}", cache);
+            if let Some((weak_texture, cached_renderer_id)) = cache.get(&combined_hash) {
+                // If the renderer ID matches, we can use the cached texture
+                if *cached_renderer_id == renderer.id() {
+                    // If we can upgrade the weak reference, return the strong Arc.
+                    // Texture is still loaded on the renderer being used.
+                    if let Some(texture) = weak_texture.upgrade() {
+                        log::debug!("Repeated texture detected with hash {:x}", combined_hash);
+                        return texture;
+                    }
+                }
+                // Weak pointer is dead or wrong renderer, we'll reload below
+            }
+        }
+
+        let image_ident = format!("gltf_texture_{:x}", combined_hash);
+        let texture = Arc::new(Texture::from_gltf(
+            data.unwrap_or_else(|| {
+                gltf::image::Data::from_source(image_source, Some(gltf_path), buffers).unwrap()
+            }),
+            image_ident,
+            sampler,
+            renderer,
+            context,
+        ));
+
+        // Store weak reference
+        self.by_hash
+            .lock()
+            .expect("Failed to lock texture weak cache mutex")
+            .insert(combined_hash, (Arc::downgrade(&texture), renderer.id()));
+        texture
+    }
+}
+
 impl Material {
     pub fn from_gltf<'a>(
         gltf_mat: gltf::Material<'a>,
@@ -44,35 +187,95 @@ impl Material {
         let metallic = gltf_mat.pbr_metallic_roughness().metallic_factor();
         let roughness = gltf_mat.pbr_metallic_roughness().roughness_factor();
 
-        let texture = base_texture_info.map(|info| {
+        let texture_cache = TextureWeakCache::singleton();
+
+        let base_color_texture = base_texture_info.map(|info| {
             let image_source = info.texture().source().source();
             let sampler = info.texture().sampler();
-
-            let image_ident;
-            match &image_source {
-                gltf::image::Source::View { view, .. } => {
-                    // TODO: Not sure if this will return unique
-                    // indexes if in a shared buffer
-                    log::warn!("Using view index as image identifier, not sure if this is working yet!");
-                    image_ident = format!("gltf_buffer_{}", view.index());
-                }
-                gltf::image::Source::Uri { uri, .. } => {
-                    image_ident = format!("gltf_{}", uri);
-                }
-            }
-
-            let data =
-                gltf::image::Data::from_source(image_source, Some(gltf_path), buffers).unwrap();
-
-            Texture::from_gltf(data, image_ident, sampler, renderer, context)
+            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
         });
 
+        let metallic_roughness_texture = gltf_mat
+            .pbr_metallic_roughness()
+            .metallic_roughness_texture()
+            .map(|info| {
+                let image_source = info.texture().source().source();
+                let sampler = info.texture().sampler();
+                texture_cache.get_or_load(
+                    image_source,
+                    gltf_path,
+                    buffers,
+                    sampler,
+                    renderer,
+                    context,
+                )
+            });
+
+        let normal_texture = gltf_mat.normal_texture().map(|info| {
+            let image_source = info.texture().source().source();
+            let sampler = info.texture().sampler();
+            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
+        });
+
+        let emissive_texture = gltf_mat.emissive_texture().map(|info| {
+            let image_source = info.texture().source().source();
+            let sampler = info.texture().sampler();
+            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
+        });
+
+        let ao_texture = gltf_mat.occlusion_texture().map(|info| {
+            let image_source = info.texture().source().source();
+            let sampler = info.texture().sampler();
+            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
+        });
+
+        let emissive_color = gltf_mat.emissive_factor();
+        let emissive_strength = gltf_mat.emissive_strength().unwrap_or(1.0);
+
+        // Determine IOR and material type
+        let ior = gltf_mat.ior().unwrap_or(1.5);
+
+        let material_type = if let Some(_) = gltf_mat.transmission() {
+            MaterialType::Glass
+        } else if metallic > 0.1 {
+            // Lower threshold - most metallic materials
+            MaterialType::Metallic
+        } else {
+            MaterialType::Diffuse
+        };
+
         let shader_mat = shaders::Material {
-            base_color,
-            has_base_texture: texture.is_some() as u32,
-            base_texture_indice: texture.as_ref().map_or(0, |t| t.bindless_indice()),
-            metallic: metallic,
-            roughness: roughness,
+            base_color: [base_color[0], base_color[1], base_color[2], base_color[3]],
+            base_color_texture_index: base_color_texture
+                .as_ref()
+                .map_or(0, |t| t.bindless_indice()),
+
+            metallic,
+            roughness,
+
+            ior,
+
+            metallic_roughness_texture_index: metallic_roughness_texture
+                .as_ref()
+                .map_or(0, |t| t.bindless_indice()),
+            normal_texture_index: normal_texture.as_ref().map_or(0, |t| t.bindless_indice()),
+            emissive_texture_index: emissive_texture.as_ref().map_or(0, |t| t.bindless_indice()),
+            ao_texture_index: ao_texture.as_ref().map_or(0, |t| t.bindless_indice()),
+
+            emissive_color: [emissive_color[0], emissive_color[1], emissive_color[2], 1.0],
+            emissive_strength,
+
+            texture_flags: generate_texture_flags(
+                &base_color_texture,
+                &metallic_roughness_texture,
+                &normal_texture,
+                &emissive_texture,
+                &ao_texture,
+            ),
+
+            material_type: material_type as u32,
+
+            _padding: 0,
         };
 
         let buffer_index = renderer.scene.add_material(&shader_mat, context);
@@ -82,10 +285,22 @@ impl Material {
             _shared_buffer_index: buffer_index,
 
             name,
+
             base_color: glam::Vec4::from_array(shader_mat.base_color),
-            base_texture: texture,
-            metallic: shader_mat.metallic,
-            roughness: shader_mat.roughness,
+            base_color_texture,
+
+            metallic,
+            roughness,
+            metallic_roughness_texture,
+
+            normal_texture,
+            emissive_texture,
+            ao_texture,
+
+            emissive_color: glam::Vec4::from_array(shader_mat.emissive_color),
+            emissive_strength,
+            ior,
+            material_type,
         }
     }
 

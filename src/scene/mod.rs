@@ -11,7 +11,7 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-use crate::{graphics::VulkanContext, renderer::shaders};
+use crate::{graphics::VulkanContext, material::TextureWeakCache, renderer::shaders};
 
 pub mod geometry;
 pub mod gltf;
@@ -33,6 +33,9 @@ pub struct Scene {
     pub material_offset: u64,
     pub shared_index_buffer: Subbuffer<[u32]>,
     pub index_offset: u64,
+
+    // A data structure to store the hashes of loaded textures
+    pub texture_weak_cache: TextureWeakCache,
 
     pub geometries_map: HashMap<String, geometry::Geometry>,
 
@@ -200,6 +203,8 @@ impl Scene {
             resources,
             rhit_descriptor_set,
             geometries_map: HashMap::new(),
+
+            texture_weak_cache: TextureWeakCache::new(),
 
             shared_offsets_buffer,
             shared_vertex_buffer,

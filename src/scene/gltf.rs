@@ -1,4 +1,8 @@
-use std::{cell::{LazyCell, RefCell}, collections::HashMap, sync::LazyLock};
+use std::{
+    cell::{LazyCell, RefCell},
+    collections::HashMap,
+    sync::LazyLock,
+};
 
 use crate::{
     graphics::VulkanContext,
@@ -45,8 +49,13 @@ impl super::Scene {
                     for primitive in mesh.primitives() {
                         let gltf_mat = primitive.material();
 
-                        let material =
-                            Material::from_gltf(gltf_mat, renderer, context, &buffers, &gltf_dir);
+                        let material = Material::from_gltf(
+                            gltf_mat,
+                            renderer,
+                            context,
+                            &buffers,
+                            &gltf_dir,
+                        );
 
                         let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
@@ -56,8 +65,12 @@ impl super::Scene {
                             None
                         });
                         _reader.read_positions();
-                        
-                        let buffer_source = buffer_source.borrow().as_ref().expect("Buffer source should be available").clone();
+
+                        let buffer_source = buffer_source
+                            .borrow()
+                            .as_ref()
+                            .expect("Buffer source should be available")
+                            .clone();
 
                         let indices = if let Some(indices_reader) = reader.read_indices() {
                             indices_reader.into_u32().collect::<Vec<_>>()
@@ -117,8 +130,13 @@ impl super::Scene {
                             primitive.index()
                         );
 
-                        let geometry =
-                            Geometry::create(ident, vertices, indices, &mut renderer.scene, context)?;
+                        let geometry = Geometry::create(
+                            ident,
+                            vertices,
+                            indices,
+                            &mut renderer.scene,
+                            context,
+                        )?;
 
                         // Create a new entity with the geometry and transform components
                         renderer.scene.world.push((geometry, transform, material));

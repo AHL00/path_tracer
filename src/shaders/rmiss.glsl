@@ -5,6 +5,9 @@
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
 
+layout(push_constant) uniform RmissPushConstants { RendererUniforms uniforms; }
+push_constants;
+
 // HDRI texture and sampler (optional, may be unbound)
 layout(set = 4, binding = 0) uniform sampler2D hdri_sampler;
 
@@ -64,7 +67,8 @@ vec3 sample_hdri(vec3 direction) {
     // Sample HDRI texture
     vec3 hdri_color = texture(hdri_sampler, uv).rgb;
     
-    return hdri_color;
+    // Apply brightness multiplier from uniforms
+    return hdri_color * push_constants.uniforms.hdri_intensity;
 }
 
 
@@ -80,6 +84,8 @@ void main() {
         sky = sky_color(direction);
     }
     
-    payload.attenuation = sky;
+    // Multiply with accumulated attenuation instead of replacing
+    // This properly accounts for surface reflectivity
+    payload.attenuation *= sky;
     payload.done = 1;
 }

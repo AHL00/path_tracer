@@ -25,14 +25,40 @@ struct Camera {
 // };
 
 struct Material {
-    vec4 base_color;
-    // TODO: Make this a bitflag type
-    // to support all textures
-    // with just one 32-bit integer
-    bool has_base_texture;
-    uint base_texture_indice;
+    // Base/Albedo
+    vec4 base_color; // 16 bytes
+    uint base_color_texture_index;
+    
+    // PBR Parameters
     float metallic;
     float roughness;
+    
+    // IOR for dielectrics
+    float ior; // 32 bytes
+    
+    // PBR Textures
+    uint metallic_roughness_texture_index;  // Combined metal(R) + rough(G) texture
+    uint normal_texture_index;
+    uint emissive_texture_index;
+    uint ao_texture_index; // 48 bytes
+    
+    // Emissive
+    vec4 emissive_color; // 64 bytes
+    float emissive_strength;
+    
+
+    // Texture flags (bitfield)
+    // bit 0: has_base_color_texture
+    // bit 1: has_metallic_roughness_texture
+    // bit 2: has_normal_texture
+    // bit 3: has_emissive_texture
+    // bit 4: has_ao_texture
+    uint texture_flags;
+    
+    // Material type (0=Diffuse, 1=Metallic, 2=Glass/Dielectric)
+    uint material_type;
+    
+    uint _padding; // 80 bytes
 };
 
 struct RayPayload {
@@ -52,6 +78,13 @@ struct RendererUniforms {
     // The number of frames already accumulated in the accumulation buffer
     uint accumulated_count;
     uint hdri_enabled;
+
+    vec2 padding;
+
+    // NOTE: Check renderer.rs for DebugMode enum definition
+    // 0=Off, 1=Metallic, 2=Roughness, 3=Normals, 4=Bounces
+    uint debug_mode;
+    float hdri_intensity;
 };
 
 // float rand(vec2 uv, float depth, uint frame_seed) {

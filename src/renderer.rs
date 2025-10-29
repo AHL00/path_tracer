@@ -17,7 +17,7 @@ use vulkano::{
     buffer::{Buffer, BufferContents, BufferCreateInfo, BufferUsage, Subbuffer},
     command_buffer::{
         AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyImageToBufferInfo,
-        PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract, ImageBlit,
+        ImageBlit, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract,
     },
     descriptor_set::{
         DescriptorSet, WriteDescriptorSet,
@@ -28,20 +28,20 @@ use vulkano::{
     },
     format::Format,
     image::{
-        Image, ImageCreateInfo, ImageSubresourceLayers, ImageUsage, ImageAspects,
-        sampler::{Sampler, Filter},
+        Image, ImageAspects, ImageCreateInfo, ImageSubresourceLayers, ImageUsage,
+        sampler::{Filter, Sampler},
         view::ImageView,
     },
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
-        PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo, Pipeline,
+        Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
+        compute::{ComputePipeline, ComputePipelineCreateInfo},
         graphics::vertex_input::Vertex,
         layout::{PipelineLayoutCreateInfo, PushConstantRange},
         ray_tracing::{
             RayTracingPipeline, RayTracingPipelineCreateInfo, RayTracingShaderGroupCreateInfo,
             ShaderBindingTable,
         },
-        compute::{ComputePipeline, ComputePipelineCreateInfo},
     },
     shader::ShaderStages,
     sync::GpuFuture,
@@ -138,10 +138,10 @@ pub struct PushConstantRequirements {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TonemappingMode {
-    Linear,      // No tonemapping, linear output
-    Reinhard,    // Reinhard tonemapping
-    ACES,        // ACES tonemapping
-    Filmic,      // Filmic tonemapping
+    Linear,   // No tonemapping, linear output
+    Reinhard, // Reinhard tonemapping
+    ACES,     // ACES tonemapping
+    Filmic,   // Filmic tonemapping
 }
 
 impl TonemappingMode {
@@ -174,7 +174,48 @@ impl TonemappingMode {
     }
 }
 
+// NOTE: Check shared.glsl for corresponding shader struct
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DebugMode {
+    Off = 0,
+    Metallic = 1,
+    Roughness = 2,
+    Normals = 3,
+    Bounces = 4,
+}
+
+impl DebugMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DebugMode::Off => "Off",
+            DebugMode::Metallic => "Metallic",
+            DebugMode::Roughness => "Roughness",
+            DebugMode::Normals => "Normals",
+            DebugMode::Bounces => "Bounces",
+        }
+    }
+
+    pub fn as_u32(&self) -> u32 {
+        *self as u32
+    }
+
+    pub fn iter() -> impl Iterator<Item = DebugMode> {
+        vec![
+            DebugMode::Off,
+            DebugMode::Metallic,
+            DebugMode::Roughness,
+            DebugMode::Normals,
+        ]
+        .into_iter()
+    }
+}
+
+pub type RendererID = u64;
+static NEXT_RENDERER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub struct Renderer {
+    id: RendererID,
     pub rgen_descriptor_set: Arc<DescriptorSet>,
 
     pub pipeline_layout: Arc<PipelineLayout>,
@@ -185,7 +226,7 @@ pub struct Renderer {
     // Path tracing buffer - where ray tracing actually renders to
     pub path_tracing_texture: Arc<ImageView>,
     pub path_tracing_descriptor_set: Arc<DescriptorSet>,
-    
+
     // Display buffer - for compatibility and potential future use
     pub render_texture: Arc<ImageView>,
     render_resolution: [u32; 2],
@@ -220,10 +261,13 @@ pub struct Renderer {
 
     // HDRI
     pub hdri_texture: Option<crate::hdri::HdriTexture>,
-    pub hdri_rotation: f32,      // in degrees (0-360)
-    pub hdri_intensity: f32,     // multiplier for brightness
+    pub hdri_rotation: f32,  // in degrees (0-360)
+    pub hdri_intensity: f32, // multiplier for brightness
     pub hdri_enabled: bool,
     pub hdri_descriptor_set: Option<Arc<DescriptorSet>>,
+
+    // Debug modes - NOTE: Check shared.glsl for corresponding shader values
+    pub debug_mode: DebugMode,
 
     pub prev_cam_state: crate::camera::Camera,
     pub resized_dirty: bool,
@@ -232,8 +276,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    const MAX_TEXTURE_COUNT: u32 = 5000; // Maximum number of textures
-    const RAY_RECURSION_DEPTH: u32 = 2;
+    const MAX_TEXTURE_COUNT: u32 = 5000;
+    const RAY_RECURSION_DEPTH: u32 = 16;
+
+    pub fn id(&self) -> RendererID {
+        self.id
+    }
 
     pub fn new(context: &crate::graphics::VulkanContext, render_resolution: [u32; 2]) -> Self {
         let push_constant_requirements = PushConstantRequirements {
@@ -530,7 +578,9 @@ impl Renderer {
                 ImageCreateInfo {
                     format: Format::R32G32B32A32_SFLOAT, // HDR format for path tracing
                     extent: [render_resolution[0], render_resolution[1], 1].into(),
-                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+                    usage: ImageUsage::STORAGE
+                        | ImageUsage::TRANSFER_SRC
+                        | ImageUsage::TRANSFER_DST,
                     ..Default::default()
                 },
                 AllocationCreateInfo::default(),
@@ -542,7 +592,10 @@ impl Renderer {
         let path_tracing_descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             pipeline_layout.set_layouts()[1].clone(),
-            [WriteDescriptorSet::image_view(0, path_tracing_texture.clone())],
+            [WriteDescriptorSet::image_view(
+                0,
+                path_tracing_texture.clone(),
+            )],
             [],
         )
         .unwrap();
@@ -556,7 +609,9 @@ impl Renderer {
                 ImageCreateInfo {
                     format: Format::R8G8B8A8_UNORM,
                     extent: [render_resolution[0], render_resolution[1], 1].into(),
-                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+                    usage: ImageUsage::STORAGE
+                        | ImageUsage::TRANSFER_SRC
+                        | ImageUsage::TRANSFER_DST,
                     ..Default::default()
                 },
                 AllocationCreateInfo::default(),
@@ -645,6 +700,7 @@ impl Renderer {
         .unwrap();
 
         let mut res = Self {
+            id: NEXT_RENDERER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             pipeline_layout,
             pipeline,
             rgen_descriptor_set,
@@ -683,6 +739,9 @@ impl Renderer {
             hdri_enabled: false,
             hdri_descriptor_set: None,
 
+            // Debug modes
+            debug_mode: DebugMode::Off,
+
             prev_cam_state: Camera::default(),
             resized_dirty: false,
             accumulated_count: 0,
@@ -710,7 +769,9 @@ impl Renderer {
                 ImageCreateInfo {
                     format: Format::R32G32B32A32_SFLOAT, // HDR format for path tracing
                     extent: [new_resolution[0], new_resolution[1], 1].into(),
-                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+                    usage: ImageUsage::STORAGE
+                        | ImageUsage::TRANSFER_SRC
+                        | ImageUsage::TRANSFER_DST,
                     ..Default::default()
                 },
                 AllocationCreateInfo::default(),
@@ -723,7 +784,10 @@ impl Renderer {
         self.path_tracing_descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             self.pipeline_layout.set_layouts()[1].clone(),
-            [WriteDescriptorSet::image_view(0, self.path_tracing_texture.clone())],
+            [WriteDescriptorSet::image_view(
+                0,
+                self.path_tracing_texture.clone(),
+            )],
             [],
         )
         .unwrap();
@@ -735,7 +799,9 @@ impl Renderer {
                 ImageCreateInfo {
                     format: Format::R8G8B8A8_UNORM,
                     extent: [new_resolution[0], new_resolution[1], 1].into(),
-                    usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+                    usage: ImageUsage::STORAGE
+                        | ImageUsage::TRANSFER_SRC
+                        | ImageUsage::TRANSFER_DST,
                     ..Default::default()
                 },
                 AllocationCreateInfo::default(),
@@ -794,7 +860,7 @@ impl Renderer {
         path: &Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let hdri = crate::hdri::HdriTexture::load(context, path)?;
-        
+
         // Create descriptor set for HDRI texture (set 4)
         let hdri_descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
@@ -806,12 +872,12 @@ impl Renderer {
             )],
             [],
         )?;
-        
+
         self.hdri_texture = Some(hdri);
         self.hdri_descriptor_set = Some(hdri_descriptor_set);
         self.hdri_enabled = true;
         self.accumulated_count = 0; // Reset accumulation when changing environment
-        
+
         Ok(())
     }
 
@@ -1091,6 +1157,9 @@ impl Renderer {
                 seed: rand::random(),
                 accumulated_count: self.accumulated_count,
                 hdri_enabled: if self.hdri_enabled { 1 } else { 0 },
+                padding: [0.0; 2].into(),
+                debug_mode: self.debug_mode.as_u32().into(),
+                hdri_intensity: self.hdri_intensity,
             },
             camera: shaders::raygen::Camera {
                 view_proj: (proj * view).to_cols_array_2d(),
@@ -1105,6 +1174,9 @@ impl Renderer {
                 seed: rand::random(),
                 accumulated_count: self.accumulated_count,
                 hdri_enabled: if self.hdri_enabled { 1 } else { 0 },
+                padding: [0.0; 2].into(),
+                debug_mode: self.debug_mode.as_u32().into(),
+                hdri_intensity: self.hdri_intensity,
             },
         };
 
@@ -1133,7 +1205,7 @@ impl Renderer {
             self.scene.rhit_descriptor_set.clone(),
             self.bindless_textures_descriptor_set.clone(),
         ];
-        
+
         // Add HDRI descriptor set if loaded
         if let Some(hdri_ds) = &self.hdri_descriptor_set {
             descriptor_sets.push(hdri_ds.clone());

@@ -60,6 +60,7 @@ pub enum ConfigAppScreen {
     Scene,
     Settings,
     Render,
+    Hierarchy,
 }
 
 impl ConfigApp {
@@ -73,6 +74,7 @@ impl ConfigApp {
                 ui.selectable_value(current_screen, ConfigAppScreen::Stats, "Stats");
                 ui.selectable_value(current_screen, ConfigAppScreen::Settings, "Settings");
                 ui.selectable_value(current_screen, ConfigAppScreen::Scene, "Scene");
+                ui.selectable_value(current_screen, ConfigAppScreen::Hierarchy, "Hierarchy");
                 ui.selectable_value(current_screen, ConfigAppScreen::Render, "Render");
             });
         });
@@ -82,44 +84,259 @@ impl ConfigApp {
             ConfigAppScreen::Scene => Self::scene(render_app, ctx),
             ConfigAppScreen::Settings => Self::settings(render_app, ctx),
             ConfigAppScreen::Render => Self::render(render_app, ctx),
+            ConfigAppScreen::Hierarchy => Self::hierarchy(render_app, ctx),
         }
     }
 
     pub fn scene(render_app: &mut RenderApp, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {});
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                // Scene panel root (kept empty for now)
+            });
+        });
+    }
+
+    pub fn hierarchy(render_app: &mut RenderApp, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Scene Hierarchy");
+
+            let renderer = match &render_app.renderer {
+                Some(r) => r,
+                None => return,
+            };
+
+            let scene = &renderer.scene;
+            let world = scene.world();
+
+            // Display entity count
+            ui.label(format!("Total Entities: {}", world.len()));
+            ui.separator();
+
+            // Create a scrollable area for the hierarchy
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    use legion::IntoQuery;
+
+                    // Collect entities with their components
+                    let mut entities_info = Vec::new();
+                    let mut query = <(
+                        &path_tracer::scene::Transform,
+                        &path_tracer::scene::geometry::Geometry,
+                        &path_tracer::material::Material,
+                    )>::query();
+
+                    for (transform, geometry, material) in query.iter(world) {
+                        entities_info.push((transform, geometry, material));
+                    }
+
+                    let total_entities = world.len();
+                    let entities_without_full_data = total_entities - entities_info.len();
+
+                    // Entities section (collapsible)
+                    if entities_info.len() > 0 {
+                        ui.collapsing(format!("📦 Entities ({})", entities_info.len()), |ui| {
+                            for (i, (transform, geometry, material)) in
+                                entities_info.iter().enumerate()
+                            {
+                                ui.collapsing(format!("Entity #{} - {}", i, material.name), |ui| {
+                                    ui.collapsing("Transform", |ui| {
+                                        ui.label(format!(
+                                            "Position: ({:.2}, {:.2}, {:.2})",
+                                            transform.position.x,
+                                            transform.position.y,
+                                            transform.position.z
+                                        ));
+                                    });
+
+                                    ui.collapsing("Material", |ui| {
+                                        ui.label(format!("Name: {}", material.name));
+
+                                        ui.separator();
+                                        ui.label("Base Properties:");
+                                        ui.label(format!(
+                                            "  Base Color: RGBA({:.3}, {:.3}, {:.3}, {:.3})",
+                                            material.base_color.x,
+                                            material.base_color.y,
+                                            material.base_color.z,
+                                            material.base_color.w
+                                        ));
+                                        ui.label(format!("  Metallic: {:.3}", material.metallic));
+                                        ui.label(format!("  Roughness: {:.3}", material.roughness));
+
+                                        ui.separator();
+                                        ui.label("Emissive:");
+                                        ui.label(format!(
+                                            "  Color: RGBA({:.3}, {:.3}, {:.3}, {:.3})",
+                                            material.emissive_color.x,
+                                            material.emissive_color.y,
+                                            material.emissive_color.z,
+                                            material.emissive_color.w
+                                        ));
+                                        ui.label(format!(
+                                            "  Strength: {:.3}",
+                                            material.emissive_strength
+                                        ));
+
+                                        ui.separator();
+                                        ui.label("Physical Properties:");
+                                        ui.label(format!("  IOR: {:.3}", material.ior));
+                                        ui.label(format!("  Type: {:?}", material.material_type));
+
+                                        ui.separator();
+                                        ui.label("Textures:");
+                                        ui.label(format!(
+                                            "  Base Color: {}",
+                                            if material.base_color_texture.is_some() {
+                                                "Yes"
+                                            } else {
+                                                "No"
+                                            }
+                                        ));
+                                        ui.label(format!(
+                                            "  Metallic/Roughness: {}",
+                                            if material.metallic_roughness_texture.is_some() {
+                                                "Yes"
+                                            } else {
+                                                "No"
+                                            }
+                                        ));
+                                        ui.label(format!(
+                                            "  Normal: {}",
+                                            if material.normal_texture.is_some() {
+                                                "Yes"
+                                            } else {
+                                                "No"
+                                            }
+                                        ));
+                                        ui.label(format!(
+                                            "  Emissive: {}",
+                                            if material.emissive_texture.is_some() {
+                                                "Yes"
+                                            } else {
+                                                "No"
+                                            }
+                                        ));
+                                        ui.label(format!(
+                                            "  Ambient Occlusion: {}",
+                                            if material.ao_texture.is_some() {
+                                                "Yes"
+                                            } else {
+                                                "No"
+                                            }
+                                        ));
+                                    });
+
+                                    ui.collapsing("Geometry", |ui| {
+                                        ui.label(format!("Vertices: {}", geometry.vertex_count));
+                                        ui.label(format!("Indices: {}", geometry.index_count));
+                                    });
+                                });
+                            }
+                        });
+                    }
+
+                    if entities_without_full_data > 0 {
+                        ui.label(format!(
+                            "⚠ Entities without full data: {}",
+                            entities_without_full_data
+                        ));
+                    }
+
+                    ui.separator();
+
+                    // Geometries section - organized hierarchically
+                    if scene.geometries_map.len() > 0 {
+                        ui.collapsing(
+                            format!("🔷 Geometries ({})", scene.geometries_map.len()),
+                            |ui| {
+                                // Group geometries by mesh name (before the last underscore)
+                                let mut geometry_groups: std::collections::HashMap<
+                                    String,
+                                    Vec<(&String, &path_tracer::scene::geometry::Geometry)>,
+                                > = std::collections::HashMap::new();
+
+                                for (name, geometry) in &scene.geometries_map {
+                                    // Extract mesh name by removing the primitive index
+                                    let mesh_name = if let Some(pos) = name.rfind('_') {
+                                        name[..pos].to_string()
+                                    } else {
+                                        name.clone()
+                                    };
+
+                                    geometry_groups
+                                        .entry(mesh_name)
+                                        .or_insert_with(Vec::new)
+                                        .push((name, geometry));
+                                }
+
+                                // Sort and display grouped geometries
+                                let mut sorted_groups: Vec<_> =
+                                    geometry_groups.into_iter().collect();
+                                sorted_groups.sort_by(|a, b| a.0.cmp(&b.0));
+
+                                for (mesh_name, primitives) in sorted_groups {
+                                    ui.collapsing(format!("📦 {}", mesh_name), |ui| {
+                                        for (prim_name, geometry) in primitives {
+                                            ui.collapsing(prim_name.clone(), |ui| {
+                                                ui.label(format!(
+                                                    "Vertices: {}",
+                                                    geometry.vertex_count
+                                                ));
+                                                ui.label(format!(
+                                                    "Indices: {}",
+                                                    geometry.index_count
+                                                ));
+                                                if geometry.dynamic.is_some() {
+                                                    ui.label("Dynamic: Yes");
+                                                } else {
+                                                    ui.label("Dynamic: No");
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
+                            },
+                        );
+                    }
+                });
+        });
     }
 
     pub fn render(render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            if ui.button("Start Render").clicked() {
-                // render_app.start_rendering();
-            }
+            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                if ui.button("Start Render").clicked() {
+                    // render_app.start_rendering();
+                }
 
-            if ui.button("Save Image").clicked() {
-                let save_path = rfd::FileDialog::new()
-                    .set_title("Save Image")
-                    .set_file_name("render.png")
-                    .save_file();
+                if ui.button("Save Image").clicked() {
+                    let save_path = rfd::FileDialog::new()
+                        .set_title("Save Image")
+                        .set_file_name("render.png")
+                        .save_file();
 
-                render_app
-                    .renderer
-                    .as_ref()
-                    .unwrap()
-                    .save_render_texture_to_file(
-                        render_app.context.as_ref().unwrap(),
-                        save_path.as_ref().unwrap(),
-                        image::ImageFormat::Png,
-                    )
-                    .unwrap_or_else(|e| {
-                        eprintln!("Failed to save image to {:?}: {}", save_path, e);
-                    });
-            }
+                    render_app
+                        .renderer
+                        .as_ref()
+                        .unwrap()
+                        .save_render_texture_to_file(
+                            render_app.context.as_ref().unwrap(),
+                            save_path.as_ref().unwrap(),
+                            image::ImageFormat::Png,
+                        )
+                        .unwrap_or_else(|e| {
+                            eprintln!("Failed to save image to {:?}: {}", save_path, e);
+                        });
+                }
+            });
         });
     }
 
     pub fn settings(render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label("Resolution");
+            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                ui.label("Resolution");
 
             let current_resolution = render_app.renderer.as_ref().unwrap().render_resolution();
             let current_resolution = (current_resolution[0], current_resolution[1]);
@@ -191,7 +408,7 @@ impl ConfigApp {
 
             if let Some(renderer) = &mut render_app.renderer {
                 let mut current_mode = renderer.tonemapping_mode;
-                
+
                 ui.horizontal(|ui| {
                     ui.label("Tonemapping Mode:");
                     egui::ComboBox::from_id_salt("TonemappingModeDropdown")
@@ -217,7 +434,10 @@ impl ConfigApp {
             if let Some(renderer) = &mut render_app.renderer {
                 ui.horizontal(|ui| {
                     ui.label("Mouse Sensitivity:");
-                    ui.add(egui::Slider::new(&mut renderer.mouse_sensitivity, 0.1..=2.0));
+                    ui.add(egui::Slider::new(
+                        &mut renderer.mouse_sensitivity,
+                        0.1..=2.0,
+                    ));
                 });
 
                 ui.horizontal(|ui| {
@@ -254,9 +474,9 @@ impl ConfigApp {
                 });
 
                 if renderer.hdri_texture.is_some() {
-                    let mut prev_enabled = renderer.hdri_enabled;
+                    let prev_enabled = renderer.hdri_enabled;
                     ui.checkbox(&mut renderer.hdri_enabled, "Enable HDRI");
-                    
+
                     // Reset accumulation when toggling HDRI
                     if renderer.hdri_enabled != prev_enabled {
                         renderer.accumulated_count = 0;
@@ -264,7 +484,7 @@ impl ConfigApp {
 
                     ui.horizontal(|ui| {
                         ui.label("HDRI Rotation:");
-                        let mut prev_rotation = renderer.hdri_rotation;
+                        let prev_rotation = renderer.hdri_rotation;
                         ui.add(egui::Slider::new(&mut renderer.hdri_rotation, 0.0..=360.0));
                         if (renderer.hdri_rotation - prev_rotation).abs() > 0.01 {
                             renderer.accumulated_count = 0;
@@ -273,88 +493,124 @@ impl ConfigApp {
 
                     ui.horizontal(|ui| {
                         ui.label("HDRI Intensity:");
-                        let mut prev_intensity = renderer.hdri_intensity;
+                        let prev_intensity = renderer.hdri_intensity;
                         ui.add(egui::Slider::new(&mut renderer.hdri_intensity, 0.1..=5.0));
                         if (renderer.hdri_intensity - prev_intensity).abs() > 0.001 {
                             renderer.accumulated_count = 0;
                         }
                     });
                 }
+
+                ui.separator();
+
+                ui.label("Debug Visualization");
+
+                ui.horizontal(|ui| {
+                    let prev_debug = renderer.debug_mode;
+
+                    ui.selectable_value(
+                        &mut renderer.debug_mode,
+                        path_tracer::renderer::DebugMode::Off,
+                        "Off",
+                    );
+                    ui.selectable_value(
+                        &mut renderer.debug_mode,
+                        path_tracer::renderer::DebugMode::Metallic,
+                        "Metallic",
+                    );
+                    ui.selectable_value(
+                        &mut renderer.debug_mode,
+                        path_tracer::renderer::DebugMode::Roughness,
+                        "Roughness",
+                    );
+                    ui.selectable_value(
+                        &mut renderer.debug_mode,
+                        path_tracer::renderer::DebugMode::Bounces,
+                        "Bounces",
+                    );
+
+                    if renderer.debug_mode != prev_debug {
+                        renderer.accumulated_count = 0;
+                    }
+                });
             }
 
-            ui.separator();
+                ui.separator();
 
-            ui.label("Denoising Settings");
+                ui.label("Denoising Settings");
 
-            ui.horizontal(|ui| {
-                let mut test = false;
-                ui.checkbox(&mut test, "Real Time Denoising");
+                ui.horizontal(|ui| {
+                    let mut test = false;
+                    ui.checkbox(&mut test, "Real Time Denoising");
+                });
             });
         });
     }
 
     pub fn stats(render_app: &mut RenderApp, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label(format!(
-                "FPS: {:.2}",
-                1.0 / render_app.stats.last_second_delta_time.as_secs_f32()
-            ));
+            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                ui.label(format!(
+                    "FPS: {:.2}",
+                    1.0 / render_app.stats.last_second_delta_time.as_secs_f32()
+                ));
 
-            ui.label(format!(
-                "Delta Time: {:.2?}",
-                render_app.stats.last_second_delta_time
-            ));
+                ui.label(format!(
+                    "Delta Time: {:.2?}",
+                    render_app.stats.last_second_delta_time
+                ));
 
-            ui.label(format!(
-                "Entities: {}",
-                render_app.renderer.as_ref().unwrap().scene.world().len()
-            ));
+                ui.label(format!(
+                    "Entities: {}",
+                    render_app.renderer.as_ref().unwrap().scene.world().len()
+                ));
 
-            ui.label(format!(
-                "Meshes: {}",
-                render_app
-                    .renderer
-                    .as_ref()
-                    .unwrap()
-                    .scene
-                    .geometries_map
-                    .len()
-            ));
+                ui.label(format!(
+                    "Meshes: {}",
+                    render_app
+                        .renderer
+                        .as_ref()
+                        .unwrap()
+                        .scene
+                        .geometries_map
+                        .len()
+                ));
 
-            ui.label(format!(
-                "Textures: {}",
-                render_app
-                    .renderer
-                    .as_ref()
-                    .unwrap()
-                    .loaded_textures_map
-                    .len()
-            ));
+                ui.label(format!(
+                    "Textures: {}",
+                    render_app
+                        .renderer
+                        .as_ref()
+                        .unwrap()
+                        .loaded_textures_map
+                        .len()
+                ));
 
-            ui.label(format!(
-                "Materials: {}",
-                render_app.renderer.as_ref().unwrap().scene.material_offset
-            ));
+                ui.label(format!(
+                    "Materials: {}",
+                    render_app.renderer.as_ref().unwrap().scene.material_offset
+                ));
 
-            ui.label(format!(
-                "Camera Position: {:?}",
-                render_app
-                    .renderer
-                    .as_ref()
-                    .unwrap()
-                    .camera
-                    .transform
-                    .position
-            ));
+                ui.label(format!(
+                    "Camera Position: {:?}",
+                    render_app
+                        .renderer
+                        .as_ref()
+                        .unwrap()
+                        .camera
+                        .transform
+                        .position
+                ));
 
-            ui.label(format!(
-                "Accumulation Count: {}",
-                render_app.renderer.as_ref().unwrap().accumulated_count
-            ));
+                ui.label(format!(
+                    "Accumulation Count: {}",
+                    render_app.renderer.as_ref().unwrap().accumulated_count
+                ));
+            });
         });
     }
 
-    pub fn redraw(&mut self, event_loop: &ActiveEventLoop, render_app: &mut RenderApp) {
+    pub fn redraw(&mut self, _event_loop: &ActiveEventLoop, render_app: &mut RenderApp) {
         let render_state = self.render_state.as_ref().unwrap();
         let platform = self.platform.as_mut().unwrap();
         let surface = self.surface.as_ref().unwrap();

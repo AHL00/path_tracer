@@ -45,6 +45,7 @@ image = "0.25.6"
 rfd = "0.15.3"
 smallvec = "1.15.1"
 image-hdr = "0.6.0"
+xxhash-rust = { version = "0.8.15", features = ["xxh64"] }
 
 [profile.release]
 debug = true

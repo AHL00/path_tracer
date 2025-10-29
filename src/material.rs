@@ -6,8 +6,9 @@ use std::{
 use gltf::json::extensions::texture;
 
 use crate::{
-    graphics::Texture,
+    graphics::{Texture, VulkanContextID},
     renderer::{Renderer, RendererID, shaders},
+    scene_resources::{SceneResources, TextureWeakCache},
 };
 
 static MATERIAL_ID: AtomicU64 = AtomicU64::new(0);
@@ -88,95 +89,10 @@ fn generate_texture_flags(
     flags
 }
 
-pub struct TextureWeakCache {
-    // Still store renderer id for validation even though it's hashed together with the data
-    by_hash: Mutex<std::collections::HashMap<u64, (Weak<Texture>, RendererID)>>,
-}
-
-impl TextureWeakCache {
-    pub fn new() -> Self {
-        Self {
-            by_hash: Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    pub fn singleton() -> &'static TextureWeakCache {
-        static INSTANCE: OnceLock<TextureWeakCache> = OnceLock::new();
-        INSTANCE.get_or_init(TextureWeakCache::new)
-    }
-
-    pub fn get_or_load(
-        &self,
-        image_source: gltf::image::Source,
-        gltf_path: &std::path::Path,
-        buffers: &[gltf::buffer::Data],
-        sampler: gltf::texture::Sampler,
-        renderer: &mut Renderer,
-        context: &crate::graphics::VulkanContext,
-    ) -> Arc<Texture> {
-        let image_hash;
-        let mut data = None;
-
-        match &image_source {
-            gltf::image::Source::View { .. } => {
-                data = Some(
-                    gltf::image::Data::from_source(image_source.clone(), Some(gltf_path), buffers).unwrap(),
-                );
-                image_hash = xxhash_rust::xxh64::xxh64(&data.as_ref().unwrap().pixels, 0);
-            }
-            gltf::image::Source::Uri { uri, .. } => {
-                image_hash = xxhash_rust::xxh64::xxh64(uri.as_bytes(), 0);
-            }
-        }
-
-        // Combine renderer ID and image hash
-        let renderer_id = renderer.id();
-        let combined_hash = xxhash_rust::xxh64::xxh64(&renderer_id.to_le_bytes(), image_hash);
-
-        // log::debug!("Loading texture with hash {:x}", combined_hash);
-
-        // Check if we have a weak reference and if it's still valid
-        {
-            let cache = self.by_hash.lock().unwrap();
-            // log::info!("Cache: {:#x?}", cache);
-            if let Some((weak_texture, cached_renderer_id)) = cache.get(&combined_hash) {
-                // If the renderer ID matches, we can use the cached texture
-                if *cached_renderer_id == renderer.id() {
-                    // If we can upgrade the weak reference, return the strong Arc.
-                    // Texture is still loaded on the renderer being used.
-                    if let Some(texture) = weak_texture.upgrade() {
-                        log::debug!("Repeated texture detected with hash {:x}", combined_hash);
-                        return texture;
-                    }
-                }
-                // Weak pointer is dead or wrong renderer, we'll reload below
-            }
-        }
-
-        let image_ident = format!("gltf_texture_{:x}", combined_hash);
-        let texture = Arc::new(Texture::from_gltf(
-            data.unwrap_or_else(|| {
-                gltf::image::Data::from_source(image_source, Some(gltf_path), buffers).unwrap()
-            }),
-            image_ident,
-            sampler,
-            renderer,
-            context,
-        ));
-
-        // Store weak reference
-        self.by_hash
-            .lock()
-            .expect("Failed to lock texture weak cache mutex")
-            .insert(combined_hash, (Arc::downgrade(&texture), renderer.id()));
-        texture
-    }
-}
-
 impl Material {
     pub fn from_gltf<'a>(
         gltf_mat: gltf::Material<'a>,
-        renderer: &mut Renderer,
+        scene_resources: Arc<Mutex<SceneResources>>,
         context: &crate::graphics::VulkanContext,
         buffers: &[gltf::buffer::Data],
         gltf_path: &std::path::Path,
@@ -192,7 +108,14 @@ impl Material {
         let base_color_texture = base_texture_info.map(|info| {
             let image_source = info.texture().source().source();
             let sampler = info.texture().sampler();
-            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
+            texture_cache.get_or_load(
+                image_source,
+                gltf_path,
+                buffers,
+                sampler,
+                scene_resources.clone(),
+                context,
+            )
         });
 
         let metallic_roughness_texture = gltf_mat
@@ -206,7 +129,7 @@ impl Material {
                     gltf_path,
                     buffers,
                     sampler,
-                    renderer,
+                    scene_resources.clone(),
                     context,
                 )
             });
@@ -214,19 +137,40 @@ impl Material {
         let normal_texture = gltf_mat.normal_texture().map(|info| {
             let image_source = info.texture().source().source();
             let sampler = info.texture().sampler();
-            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
+            texture_cache.get_or_load(
+                image_source,
+                gltf_path,
+                buffers,
+                sampler,
+                scene_resources.clone(),
+                context,
+            )
         });
 
         let emissive_texture = gltf_mat.emissive_texture().map(|info| {
             let image_source = info.texture().source().source();
             let sampler = info.texture().sampler();
-            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
+            texture_cache.get_or_load(
+                image_source,
+                gltf_path,
+                buffers,
+                sampler,
+                scene_resources.clone(),
+                context,
+            )
         });
 
         let ao_texture = gltf_mat.occlusion_texture().map(|info| {
             let image_source = info.texture().source().source();
             let sampler = info.texture().sampler();
-            texture_cache.get_or_load(image_source, gltf_path, buffers, sampler, renderer, context)
+            texture_cache.get_or_load(
+                image_source,
+                gltf_path,
+                buffers,
+                sampler,
+                scene_resources.clone(),
+                context,
+            )
         });
 
         let emissive_color = gltf_mat.emissive_factor();
@@ -278,7 +222,15 @@ impl Material {
             _padding: 0,
         };
 
-        let buffer_index = renderer.scene.add_material(&shader_mat, context);
+        let buffer_index = scene_resources
+            .lock()
+            .unwrap()
+            .add_material(&shader_mat, context);
+
+        // let buffer_index = scene_resources
+        //     .lock()
+        //     .unwrap()
+        //     .
 
         Self {
             _id: MATERIAL_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),

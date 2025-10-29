@@ -1,4 +1,7 @@
-use std::{error::Error, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex},
+};
 
 use vulkano::{
     DeviceSize, Validated, Version, VulkanError, VulkanLibrary,
@@ -29,10 +32,17 @@ use vulkano::{
 };
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 
-use crate::renderer::{self, Renderer};
+use crate::{
+    renderer::{self, Renderer},
+    scene_resources::{self, SceneResources},
+};
+
+pub type VulkanContextID = u64;
 
 /// Context containing Vulkan resources
+#[derive(Clone)]
 pub struct VulkanContext {
+    id: VulkanContextID,
     pub instance: Arc<Instance>,
     pub device: Arc<Device>,
     pub queue: Arc<Queue>,
@@ -46,13 +56,18 @@ pub struct VulkanContext {
     pub surface: Arc<Surface>,
     pub swapchain: Arc<Swapchain>,
     pub swapchain_images: Vec<Arc<Image>>,
-
-    pub previous_frame_end: Option<Box<dyn GpuFuture>>,
 }
 
 impl VulkanContext {
+    pub fn id(&self) -> VulkanContextID {
+        self.id
+    }
+
     /// Create a new Vulkan context
     pub fn new(winit: winit::window::Window) -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let winit = Arc::new(winit);
 
         let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
@@ -267,9 +282,8 @@ impl VulkanContext {
                 },
             ));
 
-        let previous_frame_end = Some(vulkano::sync::now(device.clone()).boxed());
-
         Self {
+            id,
             instance,
             device,
             queue,
@@ -282,13 +296,7 @@ impl VulkanContext {
             surface,
             swapchain,
             swapchain_images: images,
-
-            previous_frame_end,
         }
-    }
-
-    pub fn wait_for_previous_frame_end(&mut self) {
-        self.previous_frame_end.as_mut().unwrap().cleanup_finished();
     }
 
     pub fn handle_resize_recreate_swap(
@@ -384,7 +392,7 @@ impl Texture {
         image: gltf::image::Data,
         image_ident: String,
         sampler: gltf::texture::Sampler,
-        renderer: &mut Renderer,
+        scene_resources: Arc<Mutex<SceneResources>>,
         context: &VulkanContext,
     ) -> Self {
         let format = Self::map_gltf_format_to_vulkan(image.format);
@@ -393,7 +401,7 @@ impl Texture {
         let mb_size = pixels.len() as f32 / 1024.0 / 1024.0;
 
         // Try looking up the image in the renderer
-        if let Some(texture) = renderer.lookup_texture(&image_ident) {
+        if let Some(texture) = scene_resources.lock().unwrap().lookup_texture(&image_ident) {
             return texture;
         }
 
@@ -516,7 +524,11 @@ impl Texture {
         // TODO: Wait to finish?
         future.flush().unwrap();
 
-        let texture_index = renderer.add_texture(image_view.clone(), sampler.clone(), context);
+        let texture_index = scene_resources.lock().unwrap().add_texture(
+            image_view.clone(),
+            sampler.clone(),
+            context,
+        );
 
         let texture = Self {
             image,
@@ -526,7 +538,10 @@ impl Texture {
             bindless_indice: texture_index,
         };
 
-        renderer.add_texture_to_lookup_map(image_ident.clone(), texture.clone());
+        scene_resources
+            .lock()
+            .unwrap()
+            .add_texture_to_lookup_map(image_ident.clone(), texture.clone());
         log::debug!(
             "Texture loaded: {}, {}x{}, {}mb",
             image_ident,

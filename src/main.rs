@@ -14,7 +14,7 @@ use render_window::RenderApp;
 
 fn main() {
     SimpleLogger::new()
-        .with_level(log::LevelFilter::Debug)
+        .with_level(log::LevelFilter::Info)
         .without_timestamps()
         .with_module_level("vulkano", log::LevelFilter::Warn)
         .with_module_level("wgpu", log::LevelFilter::Warn)
@@ -57,7 +57,7 @@ impl winit::application::ApplicationHandler for MainApp {
         );
         self.render_app.resumed(event_loop);
         self.config_app
-            .set_child_window(self.render_app.context.as_ref().unwrap().winit.clone());
+            .set_child_window(self.render_app.render_context.as_ref().unwrap().vulkan_context.winit.clone());
     }
 
     fn window_event(

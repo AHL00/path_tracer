@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use vulkano::{
     NonNullDeviceAddress,
@@ -16,10 +16,10 @@ use vulkano::{
     sync::GpuFuture,
 };
 
-use crate::renderer::{
+use crate::{renderer::{
     CustomVertex,
     shaders::{self, Vertex},
-};
+}, scene_resources::{self, SceneResources}};
 
 #[derive(Clone)]
 /// A component representing a geometry object in the scene
@@ -55,19 +55,18 @@ impl Geometry {
         geometry_ident: String,
         vertices: Vec<CustomVertex>,
         indices: Vec<u32>,
-        scene: &mut crate::scene::Scene,
+        scene_resources: Arc<Mutex<SceneResources>>,
         context: &crate::graphics::VulkanContext,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Check if the geometry already exists
-        if scene.get_geometry(&geometry_ident).is_some() {
-            log::debug!("Geometry {} already exists, returning existing geometry", geometry_ident);
-            return Ok(scene.get_geometry(&geometry_ident).unwrap().clone());
+        if scene_resources.lock().unwrap().get_geometry(&geometry_ident).is_some() {
+            log::info!("Geometry {} already exists, returning existing geometry", geometry_ident);
+            return Ok(scene_resources.lock().unwrap().get_geometry(&geometry_ident).unwrap().clone());
         }
 
-        // log::debug!("Creating geometry [{}] with {} vertices and {} indices", geometry_ident, vertices.len(), indices.len());
-        // log::info!("Vertices: {:#?}", vertices);
+        log::info!("Creating geometry [{}] with {} vertices and {} indices", geometry_ident, vertices.len(), indices.len());
         // Upload vertex buffer
-        let (vertices_start, vertices_end) = scene.add_vertices(
+        let (vertices_start, vertices_end) = scene_resources.lock().unwrap().add_vertices(
             &vertices
                 .iter()
                 .map(|v| Vertex::from_custom_vertex(*v))
@@ -75,12 +74,12 @@ impl Geometry {
             context,
         );
 
-        let vertices_buffer = scene.get_vertices_subbuffer(vertices_start, vertices_end);
+        let vertices_buffer = scene_resources.lock().unwrap().get_vertices_subbuffer(vertices_start, vertices_end);
 
         // Upload index buffer
-        let (index_start, index_end) = scene.add_indices(&indices, context);
+        let (index_start, index_end) = scene_resources.lock().unwrap().add_indices(&indices, context);
 
-        let index_buffer = scene.get_indices_subbuffer(index_start, index_end);
+        let index_buffer = scene_resources.lock().unwrap().get_indices_subbuffer(index_start, index_end);
 
         // Build BLAS for this geometry
         let blas = unsafe { build_blas_from_mesh(vertices_buffer, Some(index_buffer), context) };
@@ -97,7 +96,7 @@ impl Geometry {
         };
 
         // Add the geometry to the scene
-        scene.add_geometry(geometry_ident, geometry.clone());
+        scene_resources.lock().unwrap().add_geometry(geometry_ident, geometry.clone());
         
         Ok(geometry)
     }

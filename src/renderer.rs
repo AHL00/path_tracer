@@ -1,10 +1,16 @@
-use std::{fs::File, path::Path, ptr::NonNull, sync::Arc, u32};
+use std::{
+    fs::File,
+    path::Path,
+    ptr::NonNull,
+    sync::{Arc, Mutex},
+    u32,
+};
 
 use bytes::Buf;
 use image::{Pixel, Rgba};
 use rand::Rng;
 use vulkano::{
-    NonExhaustive, Packed24_8,
+    Packed24_8,
     acceleration_structure::{
         AccelerationStructure, AccelerationStructureBuildGeometryInfo,
         AccelerationStructureBuildRangeInfo, AccelerationStructureBuildType,
@@ -28,9 +34,7 @@ use vulkano::{
     },
     format::Format,
     image::{
-        Image, ImageAspects, ImageCreateInfo, ImageSubresourceLayers, ImageUsage,
-        sampler::{Filter, Sampler},
-        view::ImageView,
+        Image, ImageAspects, ImageCreateInfo, ImageSubresourceLayers, ImageUsage, view::ImageView,
     },
     memory::allocator::{AllocationCreateInfo, DeviceLayout, MemoryTypeFilter},
     pipeline::{
@@ -49,9 +53,10 @@ use vulkano::{
 
 use crate::{
     camera::Camera,
-    graphics::{Texture, VulkanContext},
+    graphics::VulkanContext,
     material::Material,
-    scene::{Transform, geometry::Geometry},
+    scene::{self, Transform, geometry::Geometry},
+    scene_resources::SceneResources,
 };
 
 pub mod shaders {
@@ -236,23 +241,6 @@ pub struct Renderer {
     pub tonemap_pipeline: Arc<ComputePipeline>,
     pub tonemap_descriptor_set: Arc<DescriptorSet>,
 
-    pub tlas: Arc<AccelerationStructure>,
-
-    // Bindless textures descriptor set
-    pub bindless_textures_descriptor_set: Arc<DescriptorSet>,
-    /// This is basically a CPU side
-    /// version of the bindless textures descriptor set.
-    /// It's used when updating the descriptor set because
-    /// the entire array must be updated at once.
-    bindless_textures: Vec<(Arc<ImageView>, Arc<Sampler>)>,
-    bindless_texture_index: u32,
-    // TODO: These should be weak pointers
-    // to avoid keeping them alive
-    // Also in geometry and material
-    pub loaded_textures_map: std::collections::HashMap<String, Texture>,
-
-    pub scene: crate::scene::Scene,
-
     pub camera: crate::camera::Camera,
     pub samples_per_pixel: u32,
     pub tonemapping_mode: TonemappingMode,
@@ -275,12 +263,22 @@ pub struct Renderer {
     pub accumulation_limit: u32,
 }
 
+// SAFETY: Renderer can be safely sent between threads.
+// All shared state is either Arc-wrapped (thread-safe) or inside Arc<Mutex<>>.
+// The previous_frame_end is Arc<Mutex<>> which is Send+Sync.
+unsafe impl Send for Renderer {}
+unsafe impl Sync for Renderer {}
+
 impl Renderer {
     const MAX_TEXTURE_COUNT: u32 = 5000;
     const RAY_RECURSION_DEPTH: u32 = 16;
 
     pub fn id(&self) -> RendererID {
         self.id
+    }
+
+    pub fn pipeline_layout(&self) -> &Arc<PipelineLayout> {
+        &self.pipeline_layout
     }
 
     pub fn new(context: &crate::graphics::VulkanContext, render_resolution: [u32; 2]) -> Self {
@@ -486,8 +484,6 @@ impl Renderer {
         )
         .unwrap();
 
-        let scene = crate::scene::Scene::new(context, &pipeline_layout);
-
         let pipeline = {
             let raygen = shaders::raygen::load(context.device.clone())
                 .unwrap()
@@ -562,14 +558,6 @@ impl Renderer {
             ShaderBindingTable::new(context.memory_allocator.clone(), &pipeline).unwrap();
 
         log::info!("Shader binding table created");
-
-        let bindless_textures_descriptor_set = DescriptorSet::new(
-            context.descriptor_set_allocator_update_after_bind.clone(),
-            pipeline_layout.set_layouts().get(3).unwrap().clone(),
-            [],
-            [],
-        )
-        .unwrap();
 
         // Create the path tracing texture (where ray tracing renders to)
         let path_tracing_texture = ImageView::new_default(
@@ -701,7 +689,7 @@ impl Renderer {
 
         let mut res = Self {
             id: NEXT_RENDERER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            pipeline_layout,
+            pipeline_layout: pipeline_layout.clone(),
             pipeline,
             rgen_descriptor_set,
             push_constant_requirements,
@@ -718,13 +706,6 @@ impl Renderer {
             tonemap_descriptor_set,
 
             shader_binding_table,
-            bindless_textures_descriptor_set,
-            bindless_textures: vec![],
-            bindless_texture_index: 0,
-            loaded_textures_map: std::collections::HashMap::new(),
-
-            tlas,
-            scene,
 
             samples_per_pixel: 1,
             tonemapping_mode: TonemappingMode::ACES,
@@ -1001,14 +982,15 @@ impl Renderer {
     // }
 
     /// Update the descriptor set with self.tlas and self.uniform_buffer
-    pub fn update_descriptor_set(&mut self, context: &crate::graphics::VulkanContext) {
+    pub fn update_descriptor_set_with_tlas(
+        &mut self,
+        context: &VulkanContext,
+        tlas: Arc<AccelerationStructure>,
+    ) {
         let descriptor_set = DescriptorSet::new(
             context.descriptor_set_allocator.clone(),
             self.pipeline_layout.set_layouts()[0].clone(),
-            [WriteDescriptorSet::acceleration_structure(
-                0,
-                self.tlas.clone(),
-            )],
+            [WriteDescriptorSet::acceleration_structure(0, tlas)],
             [],
         )
         .unwrap();
@@ -1016,50 +998,13 @@ impl Renderer {
         self.rgen_descriptor_set = descriptor_set;
     }
 
-    pub fn lookup_texture(&self, image_ident: &str) -> Option<Texture> {
-        self.loaded_textures_map.get(image_ident).cloned()
-    }
-
-    pub fn add_texture_to_lookup_map(&mut self, image_ident: String, texture: Texture) {
-        self.loaded_textures_map.insert(image_ident, texture);
-    }
-
-    /// Add a texture to the global pool, returning the index of the texture
-    /// in the bindless texture descriptor set.
-    /// NOTE: Does not check whether the texture is already loaded or add it to the lookup map.
-    pub fn add_texture(
-        &mut self,
-        image: Arc<ImageView>,
-        sampler: Arc<Sampler>,
-        context: &VulkanContext,
-    ) -> u32 {
-        let index = self.bindless_texture_index;
-        self.bindless_textures
-            .push((image.clone(), sampler.clone()));
-
-        let write_descriptor_set =
-            WriteDescriptorSet::image_view_sampler_array(0, 0, self.bindless_textures.clone());
-
-        unsafe {
-            self.bindless_textures_descriptor_set
-                .update_by_ref([write_descriptor_set], [])
-                .unwrap()
-        };
-
-        self.bindless_texture_index += 1;
-
-        if self.bindless_texture_index >= Self::MAX_TEXTURE_COUNT {
-            panic!("Bindless texture pool size exceeded");
-        }
-
-        index
-    }
-
     pub fn record_commands(
         &mut self,
         image_index: u32,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-        context: &crate::graphics::VulkanContext,
+        context: &VulkanContext,
+        scene: &mut crate::scene::Scene,
+        scene_resources: Arc<Mutex<SceneResources>>,
     ) {
         let mut blas_instances = vec![];
 
@@ -1067,50 +1012,63 @@ impl Renderer {
         let mut query = <(&mut Geometry, &mut Transform, &Material)>::query();
         let mut offsets_vec = vec![];
         // TODO: If the number of meshes doesn't change, we can just update the TLAS
-        for (geometry, transform, material) in
-            query.iter_mut(self.scene.world_mut_dont_mark_dirty())
         {
-            let show_percentage = 100.0;
-            let rng = rand::rng().random_range(0.0..100.0);
-            if rng > show_percentage {
-                continue;
+            let mut world = scene.world_mut_dont_mark_dirty().lock().unwrap();
+            for (geometry, transform, material) in query.iter_mut(&mut *world) {
+                let show_percentage = 100.0;
+                let rng = rand::rng().random_range(0.0..100.0);
+                if rng > show_percentage {
+                    continue;
+                }
+
+                let offset_idx = offsets_vec.len();
+                let (vertex_offset, vertex_count) = geometry.get_shared_vertex_buffer_offsets();
+                let (index_offset, index_count) = geometry.get_shared_index_buffer_offsets();
+                let material_offset = material.get_shared_buffer_offset();
+
+                let offsets = shaders::Offsets {
+                    vertex_offset: vertex_offset as u32,
+                    vertex_count: vertex_count as u32,
+                    material_offset: material_offset as u32,
+                    padding: 0,
+                    index_offset: index_offset as u32,
+                    index_count: index_count as u32,
+                };
+                offsets_vec.push(offsets);
+
+                // TODO Only build if dynamic and necessary
+                // Find a way to update and not rebuild the whole thing
+                blas_instances.push(AccelerationStructureInstance {
+                    acceleration_structure_reference: geometry.get_blas_device_address().into(),
+                    transform: mat4_to_as_instance_array(transform.get_matrix()),
+                    instance_custom_index_and_mask: Packed24_8::new(
+                        // The index into the offset buffer
+                        offset_idx as u32,
+                        0xFF,
+                    ),
+                    // instance_shader_binding_table_record_offset_and_flags: todo!(),
+                    ..Default::default()
+                });
             }
-
-            let offset_idx = offsets_vec.len();
-            let (vertex_offset, vertex_count) = geometry.get_shared_vertex_buffer_offsets();
-            let (index_offset, index_count) = geometry.get_shared_index_buffer_offsets();
-            let material_offset = material.get_shared_buffer_offset();
-
-            let offsets = shaders::Offsets {
-                vertex_offset: vertex_offset as u32,
-                vertex_count: vertex_count as u32,
-                material_offset: material_offset as u32,
-                padding: 0,
-                index_offset: index_offset as u32,
-                index_count: index_count as u32,
-            };
-            offsets_vec.push(offsets);
-
-            // TODO Only build if dynamic and necessary
-            // Find a way to update and not rebuild the whole thing
-            blas_instances.push(AccelerationStructureInstance {
-                acceleration_structure_reference: geometry.get_blas_device_address().into(),
-                transform: mat4_to_as_instance_array(transform.get_matrix()),
-                instance_custom_index_and_mask: Packed24_8::new(
-                    // The index into the offset buffer
-                    offset_idx as u32,
-                    0xFF,
-                ),
-                // instance_shader_binding_table_record_offset_and_flags: todo!(),
-                ..Default::default()
-            });
         }
 
         // Update the offsets buffer with the new offsets
-        self.scene
+        log::debug!("About to lock scene_resources for update_shared_offsets_buffer");
+        scene_resources
+            .lock()
+            .unwrap()
             .update_shared_offsets_buffer(&offsets_vec, context);
+        log::debug!("Unlocked scene_resources after update_shared_offsets_buffer");
 
-        self.tlas = unsafe { build_top_level_acceleration_structure(blas_instances, context) };
+        log::debug!("About to build TLAS");
+        let tlas = unsafe { build_top_level_acceleration_structure(blas_instances, context) };
+        log::debug!("TLAS built, now locking scene_resources to set it");
+        
+        scene_resources
+            .lock()
+            .unwrap()
+            .set_tlas(tlas);
+        log::debug!("TLAS set");
 
         // let proj = glam::Mat4::perspective_rh(90.0_f32.to_radians(), 1280.0 / 720.0, 0.01, 10000.0);
         // let view = glam::Mat4::look_to_rh(
@@ -1119,17 +1077,20 @@ impl Renderer {
         //     glam::Vec3::new(0.0, 0.0, -1.0),
         //     glam::Vec3::new(0.0, -1.0, 0.0),
         // );
+        log::debug!("Computing projection matrix");
         let proj = glam::Mat4::perspective_rh(
             self.camera.fov_y,
             context.swapchain.image_extent()[0] as f32 / context.swapchain.image_extent()[1] as f32,
             self.camera.near,
             self.camera.far,
         );
+        log::debug!("Computing view matrix");
         let view = glam::Mat4::look_to_rh(
             self.camera.transform.position,
             self.camera.transform.forward(),
             self.camera.transform.up(),
         );
+        log::debug!("Checking dirty state");
         // println!(
         //     "Eye: {:#?}\nDir: {:#?}\nUp: {:#?}",
         //     self.camera.transform.position,
@@ -1144,8 +1105,13 @@ impl Renderer {
             self.resized_dirty = false;
             self.prev_cam_state = self.camera.clone();
 
-            cam_dirty || self.scene.check_dirty_and_reset() || resized_dirty
+            log::debug!("About to lock scene_resources to check dirty");
+            cam_dirty
+                || scene_resources.lock().unwrap().check_dirty_and_reset()
+                || resized_dirty
+                || scene.check_dirty_and_reset()
         };
+        log::debug!("Dirty state checked: {}", state_dirty);
 
         if state_dirty {
             self.accumulated_count = 0;
@@ -1184,6 +1150,7 @@ impl Renderer {
             self.accumulated_count += 1;
         }
 
+        log::debug!("Pushing raygen constants");
         builder
             .push_constants(
                 self.pipeline_layout.clone(),
@@ -1192,19 +1159,28 @@ impl Renderer {
             )
             .unwrap();
 
+        log::debug!("Pushing closest_hit constants");
         builder
             .push_constants(self.pipeline_layout.clone(), 0, closest_hit_push_constants)
             .unwrap();
 
         // Update the descriptor set with the new TLAS
-        self.update_descriptor_set(context);
+        log::debug!("About to lock scene_resources to get TLAS");
+        let tlas = scene_resources.lock().unwrap().tlas().clone();
+        log::debug!("Got TLAS, updating descriptor set");
+        self.update_descriptor_set_with_tlas(context, tlas);
+        log::debug!("Descriptor set updated");
 
+        log::debug!("Building descriptor sets vector");
         let mut descriptor_sets = vec![
             self.rgen_descriptor_set.clone(),
             self.path_tracing_descriptor_set.clone(), // Render to path tracing buffer
-            self.scene.rhit_descriptor_set.clone(),
-            self.bindless_textures_descriptor_set.clone(),
         ];
+        log::debug!("Getting rhit_descriptor_set");
+        descriptor_sets.push(scene_resources.lock().unwrap().rhit_descriptor_set.clone());
+        log::debug!("Getting bindless_textures_descriptor_set");
+        descriptor_sets.push(scene_resources.lock().unwrap().bindless_textures_descriptor_set().clone());
+        log::debug!("Descriptor sets vector built");
 
         // Add HDRI descriptor set if loaded
         if let Some(hdri_ds) = &self.hdri_descriptor_set {
@@ -1215,6 +1191,7 @@ impl Renderer {
             descriptor_sets.push(self.rgen_descriptor_set.clone()); // placeholder
         }
 
+        log::debug!("About to record ray tracing commands");
         builder
             .bind_descriptor_sets(
                 PipelineBindPoint::RayTracing,

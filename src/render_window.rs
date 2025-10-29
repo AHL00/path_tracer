@@ -1,10 +1,13 @@
 use std::{
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use glam::Vec3;
-use path_tracer::{graphics::VulkanContext, renderer::Renderer, scene::Scene};
+use path_tracer::{
+    graphics::VulkanContext, render_app::RenderContext, renderer::Renderer, scene::Scene,
+    scene_resources,
+};
 use vulkano::{
     Validated, VulkanError,
     command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage},
@@ -62,8 +65,7 @@ impl RenderAppStats {
 }
 
 pub struct RenderApp {
-    pub context: Option<VulkanContext>,
-    pub renderer: Option<Renderer>,
+    pub render_context: Option<RenderContext>,
 
     pub stats: RenderAppStats,
 
@@ -83,8 +85,7 @@ pub struct RenderApp {
 impl RenderApp {
     pub fn new() -> Self {
         Self {
-            context: None,
-            renderer: None,
+            render_context: None,
             stats: RenderAppStats::new(),
 
             _parent_window: None,
@@ -103,6 +104,7 @@ impl RenderApp {
     }
 
     pub fn redraw(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
+        log::debug!("redraw() called");
         self.stats.update_frame_start();
 
         // Update camera based on pressed keys with smooth delta_time movement
@@ -114,11 +116,14 @@ impl RenderApp {
             delta_time = MAX_DELTA_TIME;
         }
 
-        let mut movement_speed = if let Some(renderer) = &self.renderer {
-            renderer.movement_speed
-        } else {
-            5.0
-        };
+        if let None = self.render_context {
+            log::warn!("Render context not initialized yet, skipping redraw");
+            return;
+        }
+
+        let render_context = self.render_context.as_mut().unwrap();
+
+        let mut movement_speed = render_context.renderer.movement_speed;
 
         // Apply speed boost when shift is held
         if self.keys_pressed[8] {
@@ -126,7 +131,9 @@ impl RenderApp {
             movement_speed *= 2.5; // 2.5x faster when sprinting
         }
 
-        if let Some(renderer) = &mut self.renderer {
+        {
+            let renderer = &mut render_context.renderer;
+
             let forward = renderer.camera.transform.forward();
             let right = renderer.camera.transform.right();
             let up = renderer.camera.transform.up();
@@ -194,22 +201,35 @@ impl RenderApp {
             self.mouse_prev_position = self.mouse_position;
         }
 
-        let context = self.context.as_mut().unwrap();
-        let renderer = self.renderer.as_mut().unwrap();
-
-        context.wait_for_previous_frame_end();
+        render_context.wait_for_previous_frame_end();
 
         if self._queue_recreate_swapchain {
-            context
-                .handle_resize_recreate_swap(renderer, context.swapchain.image_extent().into())
+            log::debug!("Recreating swapchain");
+            render_context
+                .vulkan_context
+                .handle_resize_recreate_swap(
+                    &mut render_context.renderer,
+                    render_context
+                        .vulkan_context
+                        .swapchain
+                        .image_extent()
+                        .into(),
+                )
                 .unwrap();
             self._queue_recreate_swapchain = false;
         }
 
+        log::debug!("About to acquire next image");
         let (image_index, suboptimal, acquire_future) =
-            match acquire_next_image(context.swapchain.clone(), None).map_err(Validated::unwrap) {
-                Ok(r) => r,
+            match acquire_next_image(render_context.vulkan_context.swapchain.clone(), None)
+                .map_err(Validated::unwrap)
+            {
+                Ok(r) => {
+                    log::debug!("Acquired image {}", r.0);
+                    r
+                }
                 Err(VulkanError::OutOfDate) => {
+                    log::debug!("Swapchain out of date");
                     self._queue_recreate_swapchain = true;
                     return;
                 }
@@ -220,46 +240,77 @@ impl RenderApp {
             self._queue_recreate_swapchain = true;
         }
 
+        log::debug!("Creating command buffer builder");
         // Consolidate this into the renderer struct?
         let mut builder = AutoCommandBufferBuilder::primary(
-            context.command_buffer_allocator.clone(),
-            context.queue.queue_family_index(),
+            render_context
+                .vulkan_context
+                .command_buffer_allocator
+                .clone(),
+            render_context.vulkan_context.queue.queue_family_index(),
             CommandBufferUsage::OneTimeSubmit,
         )
         .unwrap();
 
-        renderer.record_commands(image_index, &mut builder, context);
+        log::debug!("Recording commands");
+        render_context.renderer.record_commands(
+            image_index,
+            &mut builder,
+            &render_context.vulkan_context,
+            &mut render_context.scene,
+            render_context.scene_resources.clone(),
+        );
 
+        log::debug!("Building command buffer");
         let command_buffer = builder.build().unwrap();
 
-        context.winit.pre_present_notify();
+        log::debug!("Pre-present notify");
+        render_context.vulkan_context.winit.pre_present_notify();
 
-        let future = context
+        log::debug!("Joining with acquire future");
+        let future = render_context
             .previous_frame_end
+            .lock()
+            .unwrap()
             .take()
             .unwrap()
             .join(acquire_future)
-            .then_execute(context.queue.clone(), command_buffer)
+            .then_execute(render_context.vulkan_context.queue.clone(), command_buffer)
             .unwrap()
             .then_swapchain_present(
-                context.queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(context.swapchain.clone(), image_index),
+                render_context.vulkan_context.queue.clone(),
+                SwapchainPresentInfo::swapchain_image_index(
+                    render_context.vulkan_context.swapchain.clone(),
+                    image_index,
+                ),
             )
             .then_signal_fence_and_flush();
 
+        log::debug!("Handling future result");
         match future.map_err(Validated::unwrap) {
             Ok(future) => {
-                context.previous_frame_end = Some(future.boxed());
+                *render_context
+                    .previous_frame_end
+                    .lock()
+                    .unwrap() = Some(future.boxed());
             }
             Err(VulkanError::OutOfDate) => {
                 self._queue_recreate_swapchain = true;
-                context.previous_frame_end =
-                    Some(vulkano::sync::now(context.device.clone()).boxed());
+
+                *render_context
+                    .previous_frame_end
+                    .lock()
+                    .unwrap() =
+                    Some(vulkano::sync::now(render_context.vulkan_context.device.clone()).boxed());
             }
             Err(e) => {
                 println!("failed to flush future: {e}");
-                context.previous_frame_end =
-                    Some(vulkano::sync::now(context.device.clone()).boxed());
+
+                *render_context
+                    .previous_frame_end
+                    .lock()
+                    .unwrap() =
+                    Some(vulkano::sync::now(render_context.vulkan_context.device.clone()).boxed());
             }
         }
 
@@ -267,9 +318,6 @@ impl RenderApp {
         //     "Rendered to swapchain image {}",
         //     image_index
         // );
-
-        // Prevent background processing that might mess with buffers
-        context.wait_for_previous_frame_end();
     }
 }
 
@@ -340,100 +388,117 @@ impl ApplicationHandler for RenderApp {
             window.set_outer_position(new_pos);
         }
 
-        self.context = Some(VulkanContext::new(window));
-
         const DEFAULT_RENDER_RESOLUTION: [u32; 2] = [1280, 720];
 
-        let mut renderer =
-            Renderer::new(&self.context.as_ref().unwrap(), DEFAULT_RENDER_RESOLUTION);
+        let mut render_context =
+            RenderContext::new(VulkanContext::new(window), DEFAULT_RENDER_RESOLUTION);
 
         log::info!("Loading HDRI...");
 
-        renderer.load_hdri(
-            self.context.as_ref().unwrap(),
-            std::path::Path::new("./assets/hdri/meadow_2_4k.exr"),
-        )
-        .expect("Failed to load default HDRI");
+        let start = Instant::now();
+
+        render_context
+            .renderer
+            .load_hdri(
+                &render_context.vulkan_context,
+                std::path::Path::new("./assets/hdri/meadow_2_4k.exr"),
+            )
+            .expect("Failed to load default HDRI");
 
         log::info!("Loading GLTF scene...");
 
-        // Scene::import_gltf(
-        //     &mut renderer,
-        //     std::path::Path::new("./assets/sponza/Sponza.gltf"),
-        //     &self.context.as_ref().unwrap(),
-        //     Vec3::new(50.0, 0.0, 0.0),
-        //     1.0,
-        // )
-        // .unwrap();
+        render_context
+            .scene
+            .import_gltf(
+                std::path::Path::new("./assets/sponza/Sponza.gltf"),
+                &render_context.vulkan_context,
+                Vec3::new(50.0, 0.0, 0.0),
+                render_context.scene_resources.clone(),
+                1.0,
+            )
+            .unwrap();
 
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/bistro/bistro.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::new(40.0, 0.0, 0.0),
-            1.0
-        )
-        .unwrap();
+        // TODO: Fix deadlock during loading
+        // render_context
+        //     .scene
+        //     .import_gltf(
+        //         std::path::Path::new("./assets/bistro/bistro.gltf"),
+        //         &render_context.vulkan_context,
+        //         Vec3::new(40.0, 0.0, 0.0),
+        //         render_context.scene_resources.clone(),
+        //         1.0,
+        //     )
+        //     .unwrap();
 
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/cornell/cornell.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::new(0.0, 0.0, 0.0),
-            1.0,
-        )
-        .unwrap();
+        render_context
+            .scene
+            .import_gltf(
+                std::path::Path::new("./assets/cornell/cornell.gltf"),
+                &render_context.vulkan_context,
+                Vec3::new(0.0, 0.0, 0.0),
+                render_context.scene_resources.clone(),
+                1.0,
+            )
+            .unwrap();
 
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/toy_car/ToyCar.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::new(0.0, 0.0, 5.0),
-            100.0,
-        )
-        .unwrap();
+        render_context
+            .scene
+            .import_gltf(
+                std::path::Path::new("./assets/toy_car/ToyCar.gltf"),
+                &render_context.vulkan_context,
+                Vec3::new(0.0, 0.0, 5.0),
+                render_context.scene_resources.clone(),
+                100.0,
+            )
+            .unwrap();
 
         //     Scene::import_gltf(
         //     &mut renderer,
         //     std::path::Path::new("./assets/toy_car/ToyCar.gltf"),
-        //     &self.context.as_ref().unwrap(),
+        //     &render_context.context.as_ref().unwrap(),
         //     Vec3::new(50.0, 0.0, 0.0),
         //     200.0,
         // )
         // .unwrap();
 
+        render_context
+            .scene
+            .import_gltf(
+                std::path::Path::new("./assets/lion_head_2k/lion_head_2k.gltf"),
+                &render_context.vulkan_context,
+                Vec3::new(4.0, 0.0, 0.0),
+                render_context.scene_resources.clone(),
+                5.0,
+            )
+            .unwrap();
 
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/lion_head_2k/lion_head_2k.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::new(4.0, 0.0, 0.0),
-            5.0,
-        )
-        .unwrap();
-
-        Scene::import_gltf(
-            &mut renderer,
-            std::path::Path::new("./assets/boulder_01_2k/boulder_01_2k.gltf"),
-            &self.context.as_ref().unwrap(),
-            Vec3::new(-4.0, 0.0, 0.0),
-            1.0,
-        )
-        .unwrap();
+        render_context
+            .scene
+            .import_gltf(
+                std::path::Path::new("./assets/boulder_01_2k/boulder_01_2k.gltf"),
+                &render_context.vulkan_context,
+                Vec3::new(-4.0, 0.0, 0.0),
+                render_context.scene_resources.clone(),
+                1.0,
+            )
+            .unwrap();
 
         // Scene::import_gltf(
         //     &mut renderer,
         //     std::path::Path::new("./assets/spheres/spheres.gltf"),
-        //     &self.context.as_ref().unwrap(),
+        //     &render_context.context.as_ref().unwrap(),
         //     Vec3::ZERO,
         // )
         // .unwrap();
 
-        renderer.camera.transform.position = [-1.5, 1.0, 5.0].into();
+        let duration = start.elapsed();
+        log::info!("GLTF scenes and assets loaded in {:.2?}", duration);
+
+        render_context.renderer.camera.transform.position = [-1.5, 1.0, 5.0].into();
 
         log::info!("GLTF scene loaded");
 
-        self.renderer = Some(renderer);
+        self.render_context = Some(render_context);
     }
 
     fn window_event(
@@ -444,7 +509,7 @@ impl ApplicationHandler for RenderApp {
     ) {
         match event {
             WindowEvent::Resized(size) => {
-                if let Some(context) = &mut self.context {
+                if let Some(render_context) = &mut self.render_context {
                     if size.width <= 0 || size.height <= 0 {
                         return;
                     }
@@ -453,8 +518,9 @@ impl ApplicationHandler for RenderApp {
                     // context.wait_for_previous_frame_end();
 
                     // Calls the renderer's resize handler inside
-                    context
-                        .handle_resize_recreate_swap(self.renderer.as_mut().unwrap(), size)
+                    render_context
+                        .vulkan_context
+                        .handle_resize_recreate_swap(&mut render_context.renderer, size)
                         .unwrap();
                 }
             }
@@ -504,55 +570,58 @@ impl ApplicationHandler for RenderApp {
                         // Right click pressed - capture starting position, hide cursor, lock mouse
                         self.mouse_captured = true;
                         self.mouse_capture_start = self.mouse_position;
-                        
-                        if let Some(context) = &self.context {
-                            let _ = context.winit.set_cursor_visible(false);
+
+                        if let Some(render_context) = &self.render_context {
+                            let _ = render_context
+                                .vulkan_context
+                                .winit
+                                .set_cursor_visible(false);
                         }
                     } else {
                         // Right click released - show cursor and unlock
                         self.mouse_captured = false;
                         self.mouse_capture_start = None;
-                        
-                        if let Some(context) = &self.context {
-                            let _ = context.winit.set_cursor_visible(true);
+
+                        if let Some(render_context) = &self.render_context {
+                            let _ = render_context.vulkan_context.winit.set_cursor_visible(true);
                         }
                     }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_position = Some((position.x, position.y));
-                
+
                 // When mouse is captured, wrap it at screen edges
                 if self.mouse_captured {
-                    if let Some(context) = &self.context {
-                        let window = &context.winit;
+                    if let Some(render_context) = &self.render_context {
+                        let window = &render_context.vulkan_context.winit;
                         let size = window.inner_size();
                         let width = size.width as f64;
                         let height = size.height as f64;
-                        
+
                         let mut new_x = position.x;
                         let mut new_y = position.y;
                         let margin = 5.0; // Wrap when near edge
-                        
+
                         // Wrap horizontally
                         if new_x < margin {
                             new_x = width - margin - 1.0;
                         } else if new_x > width - margin {
                             new_x = margin + 1.0;
                         }
-                        
+
                         // Wrap vertically
                         if new_y < margin {
                             new_y = height - margin - 1.0;
                         } else if new_y > height - margin {
                             new_y = margin + 1.0;
                         }
-                        
+
                         // If we wrapped, set cursor position and update tracking
                         if new_x != position.x || new_y != position.y {
-                            let _ = window.set_cursor_position(
-                                winit::dpi::PhysicalPosition::new(new_x, new_y)
-                            );
+                            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(
+                                new_x, new_y,
+                            ));
                             self.mouse_position = Some((new_x, new_y));
                             self.mouse_prev_position = Some((new_x, new_y));
                         }
@@ -564,14 +633,16 @@ impl ApplicationHandler for RenderApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop) {
-        if let Some(context) = &mut self.context {
-            context.winit.request_redraw();
+        if let Some(render_context) = &self.render_context {
+            render_context.vulkan_context.winit.request_redraw();
         }
     }
 }
 
 impl RenderApp {
     pub fn window_id(&self) -> Option<winit::window::WindowId> {
-        self.context.as_ref().map(|c| c.winit.id())
+        self.render_context
+            .as_ref()
+            .map(|c| c.vulkan_context.winit.id())
     }
 }
